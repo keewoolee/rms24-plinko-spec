@@ -22,33 +22,9 @@ def xor_bytes(a: bytes, b: bytes) -> bytes:
     return bytes(x ^ y for x, y in zip(a, b))
 
 
-def xor_entries(entries: list[bytes]) -> bytes:
-    """
-    XOR multiple entries together.
-
-    Args:
-        entries: List of byte strings (all same length)
-
-    Returns:
-        XOR of all entries
-    """
-    if not entries:
-        raise ValueError("Cannot XOR empty list")
-
-    result = entries[0]
-    for entry in entries[1:]:
-        result = xor_bytes(result, entry)
-    return result
-
-
 def zero_entry(entry_size: int) -> bytes:
     """Create a zero-filled entry."""
     return bytes(entry_size)
-
-
-def random_offset(w: int) -> int:
-    """Generate a random offset within a block of size w."""
-    return secrets.randbelow(w)
 
 
 class Database:

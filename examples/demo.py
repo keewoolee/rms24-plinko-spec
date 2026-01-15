@@ -48,10 +48,10 @@ def main():
     server = Server(db, params)
     client = Client(params)
 
-    # Run offline phase
-    print("\n[2] Running offline phase (streaming database)...")
+    # Generate hints
+    print("\n[2] Generating hints (streaming database)...")
     start = time.time()
-    client.offline(server.stream_database())
+    client.generate_hints(server.stream_database())
     offline_time = time.time() - start
     print(f"    Offline phase completed in {offline_time:.3f}s")
 
@@ -66,7 +66,7 @@ def main():
         query = client.query(idx)
         response = server.answer(query)
         result = client.extract(response)
-        client.replenish()
+        client.replenish_hint()
         query_time = time.time() - start
         query_times.append(query_time)
 

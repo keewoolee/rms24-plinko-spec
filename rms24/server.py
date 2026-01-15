@@ -39,7 +39,7 @@ class Server:
         Server computes XOR of entries in each subset.
 
         Args:
-            query: Query containing two subsets of indices
+            query: Query containing two subsets of (block, offset) pairs
 
         Returns:
             Response containing XOR parities of each subset
@@ -48,21 +48,22 @@ class Server:
         parity_1 = self._compute_parity(query.subset_1)
         return Response(parity_0=parity_0, parity_1=parity_1)
 
-    def _compute_parity(self, indices: list[int]) -> bytes:
+    def _compute_parity(self, subset: list[tuple[int, int]]) -> bytes:
         """
-        Compute XOR of database entries at given indices.
+        Compute XOR of database entries at given (block, offset) pairs.
 
         Args:
-            indices: List of database indices
+            subset: List of (block, offset) pairs
 
         Returns:
-            XOR of all entries at the given indices
+            XOR of all entries at the given positions
         """
-        if not indices:
+        if not subset:
             return zero_entry(self.params.entry_size)
 
-        result = self.db[indices[0]]
-        for idx in indices[1:]:
+        result = zero_entry(self.params.entry_size)
+        for block, offset in subset:
+            idx = self.params.index_from_block_offset(block, offset)
             result = xor_bytes(result, self.db[idx])
         return result
 

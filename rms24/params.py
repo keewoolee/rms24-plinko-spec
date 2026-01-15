@@ -98,7 +98,7 @@ class Params:
 
     def index_from_block_offset(self, block: int, offset: int) -> int:
         """Compute database index from block and offset."""
-        return block * self.w + (offset % self.w)
+        return block * self.w + offset
 
     def __repr__(self) -> str:
         return (

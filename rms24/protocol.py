@@ -10,8 +10,8 @@ from dataclasses import dataclass
 @dataclass
 class Query:
     """Query from client to server."""
-    subset_0: list[int]
-    subset_1: list[int]
+    subset_0: list[tuple[int, int]]  # list of (block, offset) pairs
+    subset_1: list[tuple[int, int]]  # list of (block, offset) pairs
 
 
 @dataclass

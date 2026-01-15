@@ -102,11 +102,20 @@ class TestPRF:
 
     def test_median_cutoff(self):
         values = [10, 20, 30, 40, 50, 60]
-        cutoff = find_median_cutoff(values)
+        cutoff, unselected = find_median_cutoff(values)
         below = sum(1 for v in values if v < cutoff)
-        above = sum(1 for v in values if v > cutoff)
+        at_or_above = sum(1 for v in values if v >= cutoff)
         assert below == 3
-        assert above == 3
+        assert at_or_above == 3
+        assert len(unselected) == 3
+        assert all(values[i] >= cutoff for i in unselected)
+
+    def test_median_cutoff_collision(self):
+        """When middle values collide, cutoff should be None."""
+        values = [10, 20, 30, 30, 50, 60]  # Collision at median
+        cutoff, unselected = find_median_cutoff(values)
+        assert cutoff is None
+        assert unselected == []
 
 
 class TestXOR:
@@ -144,23 +153,23 @@ class TestEndToEnd:
 
     def test_offline_phase(self, small_setup):
         params, db, server, client = small_setup
-        client.offline(server.stream_database())
+        client.generate_hints(server.stream_database())
         assert client.remaining_queries() > 0
 
     def test_single_query(self, small_setup):
         params, db, server, client = small_setup
-        client.offline(server.stream_database())
+        client.generate_hints(server.stream_database())
 
         # Query index 0
         query = client.query(0)
         response = server.answer(query)
         result = client.extract(response)
-        client.replenish()
+        client.replenish_hint()
         assert result == db[0]
 
     def test_multiple_queries(self, small_setup):
         params, db, server, client = small_setup
-        client.offline(server.stream_database())
+        client.generate_hints(server.stream_database())
 
         # Query multiple indices
         test_indices = [0, 1, 10, 50, 100, params.n - 1]
@@ -170,12 +179,12 @@ class TestEndToEnd:
             query = client.query(idx)
             response = server.answer(query)
             result = client.extract(response)
-            client.replenish()
+            client.replenish_hint()
             assert result == db[idx], f"Mismatch at index {idx}"
 
     def test_random_queries(self, small_setup):
         params, db, server, client = small_setup
-        client.offline(server.stream_database())
+        client.generate_hints(server.stream_database())
 
         # Query random indices
         num_queries = min(20, client.remaining_queries())
@@ -184,12 +193,12 @@ class TestEndToEnd:
             query = client.query(idx)
             response = server.answer(query)
             result = client.extract(response)
-            client.replenish()
+            client.replenish_hint()
             assert result == db[idx], f"Mismatch at index {idx}"
 
     def test_repeated_queries_same_index(self, small_setup):
         params, db, server, client = small_setup
-        client.offline(server.stream_database())
+        client.generate_hints(server.stream_database())
 
         # Query the same index multiple times
         idx = 42
@@ -197,7 +206,7 @@ class TestEndToEnd:
             query = client.query(idx)
             response = server.answer(query)
             result = client.extract(response)
-            client.replenish()
+            client.replenish_hint()
             assert result == db[idx]
 
     def test_random_database(self):
@@ -207,7 +216,7 @@ class TestEndToEnd:
         server = Server(db, params)
         client = Client(params)
 
-        client.offline(server.stream_database())
+        client.generate_hints(server.stream_database())
 
         # Query random indices
         for _ in range(min(10, client.remaining_queries())):
@@ -215,7 +224,7 @@ class TestEndToEnd:
             query = client.query(idx)
             response = server.answer(query)
             result = client.extract(response)
-            client.replenish()
+            client.replenish_hint()
             assert result == db[idx]
 
 
@@ -228,20 +237,20 @@ class TestHintReplenishment:
         server = Server(db, params)
         client = Client(params)
 
-        client.offline(server.stream_database())
+        client.generate_hints(server.stream_database())
         initial_remaining = client.remaining_queries()
 
         # Each query should decrease remaining by 1
         query = client.query(0)
         response = server.answer(query)
         client.extract(response)
-        client.replenish()
+        client.replenish_hint()
         assert client.remaining_queries() == initial_remaining - 1
 
         query = client.query(1)
         response = server.answer(query)
         client.extract(response)
-        client.replenish()
+        client.replenish_hint()
         assert client.remaining_queries() == initial_remaining - 2
 
     def test_hint_contains_queried_index(self):
@@ -251,21 +260,21 @@ class TestHintReplenishment:
         server = Server(db, params)
         client = Client(params)
 
-        client.offline(server.stream_database())
+        client.generate_hints(server.stream_database())
 
         # Query an index
         idx = 42
         query = client.query(idx)
         response = server.answer(query)
         client.extract(response)
-        client.replenish()
+        client.replenish_hint()
 
         # The replenished hint should contain idx
         # We can verify by querying it again
         query = client.query(idx)
         response = server.answer(query)
         result = client.extract(response)
-        client.replenish()
+        client.replenish_hint()
         assert result == db[idx]
 
 
