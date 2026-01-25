@@ -5,6 +5,7 @@
 //!     --db data/database.bin --lambda 80 --iterations 5
 
 use clap::{Parser, ValueEnum};
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -100,6 +101,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
 
         println!("Running Phase 1 (CPU)...");
+        io::stdout().flush().unwrap();
         let phase1_start = Instant::now();
 
         enum Phase1Data {
@@ -155,11 +157,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let phase1_time = phase1_start.elapsed();
         println!("Phase 1 complete: {:.2}s", phase1_time.as_secs_f64());
+        io::stdout().flush().unwrap();
 
         println!("\nInitializing GPU...");
+        io::stdout().flush().unwrap();
         let generator = GpuHintGenerator::new(0)?;
 
         println!("\nWarming up ({} iterations)...", args.warmup);
+        io::stdout().flush().unwrap();
         for _ in 0..args.warmup {
             match &phase1 {
                 Phase1Data::Old { prf_key, hint_meta } => {
