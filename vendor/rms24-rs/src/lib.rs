@@ -9,7 +9,7 @@ pub mod hints;
 pub mod client;
 // pub mod server;
 
-// #[cfg(feature = "cuda")]
-// pub mod gpu;
+#[cfg(feature = "cuda")]
+pub mod gpu;
 
 pub use params::Params;
