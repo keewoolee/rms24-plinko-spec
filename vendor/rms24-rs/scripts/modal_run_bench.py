@@ -34,11 +34,13 @@ def _run_bench(
 
     os.chdir("/app")
 
-    if not os.path.exists(db_path):
+    if db_path.startswith("synthetic:"):
+        print(f"Using synthetic database: {db_path}")
+    elif not os.path.exists(db_path):
         raise FileNotFoundError(f"Database not found: {db_path}")
-
-    size_gb = os.path.getsize(db_path) / 1e9
-    print(f"Data: {db_path} ({size_gb:.2f} GB)")
+    else:
+        size_gb = os.path.getsize(db_path) / 1e9
+        print(f"Data: {db_path} ({size_gb:.2f} GB)")
 
     env = os.environ.copy()
     env["PATH"] = f"/root/.cargo/bin:/usr/local/cuda/bin:{env.get('PATH', '')}"
