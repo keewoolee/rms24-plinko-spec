@@ -39,6 +39,10 @@ struct Args {
     #[arg(long)]
     max_hints: Option<u32>,
 
+    /// Starting hint index (for distributed generation across GPUs)
+    #[arg(long, default_value = "0")]
+    hint_start: u32,
+
     /// Entry size in bytes
     #[arg(long, default_value = "40")]
     entry_size: usize,
@@ -88,7 +92,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         params.total_hints() as u32
     };
-    println!("Generating: {} hints", total_hints);
+    let hint_start = args.hint_start;
+    let hint_end = (hint_start + total_hints).min(params.total_hints() as u32);
+    let hint_count = hint_end - hint_start;
+    println!(
+        "Generating: {} hints (range {}..{})",
+        hint_count, hint_start, hint_end
+    );
     println!();
 
     #[cfg(feature = "cuda")]
@@ -104,7 +114,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             num_blocks: params.num_blocks,
             num_reg_hints: params.num_reg_hints as u32,
             num_backup_hints: params.num_backup_hints as u32,
-            total_hints,
+            total_hints: hint_count,
             _padding: 0,
         };
 
@@ -157,7 +167,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Kernel::Warp => {
                 let client = Client::new(params.clone());
-                let subsets = client.generate_subsets();
+                let subsets = client.generate_subsets_range(hint_start as usize, hint_end as usize);
                 let subset_data = SubsetData::from_subsets(&subsets);
                 Phase1Data::Warp { subset_data }
             }

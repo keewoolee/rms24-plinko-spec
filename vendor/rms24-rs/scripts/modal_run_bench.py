@@ -27,7 +27,8 @@ image = (
 
 
 def _run_bench(
-    gpu: str, db_path: str, lambda_param: int, iterations: int, max_hints: int = None
+    gpu: str, db_path: str, lambda_param: int, iterations: int, max_hints: int = None,
+    hint_start: int = 0,
 ) -> dict:
     import os
     import subprocess
@@ -83,6 +84,8 @@ def _run_bench(
     ]
     if max_hints:
         cmd.extend(["--max-hints", str(max_hints)])
+    if hint_start > 0:
+        cmd.extend(["--hint-start", str(hint_start)])
 
     import sys
 
@@ -98,8 +101,9 @@ def bench_h200(
     lambda_param: int = 80,
     iterations: int = 5,
     max_hints: int = None,
+    hint_start: int = 0,
 ):
-    return _run_bench("H200", db_path, lambda_param, iterations, max_hints)
+    return _run_bench("H200", db_path, lambda_param, iterations, max_hints, hint_start)
 
 
 @app.function(image=image, gpu="B200", volumes={"/data": volume}, timeout=7200)
@@ -108,8 +112,9 @@ def bench_b200(
     lambda_param: int = 80,
     iterations: int = 5,
     max_hints: int = None,
+    hint_start: int = 0,
 ):
-    return _run_bench("B200", db_path, lambda_param, iterations, max_hints)
+    return _run_bench("B200", db_path, lambda_param, iterations, max_hints, hint_start)
 
 
 @app.local_entrypoint()

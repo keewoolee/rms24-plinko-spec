@@ -32,13 +32,19 @@ impl Client {
     /// Does NOT stream database or compute parities.
     /// Uses rayon for parallel processing across hints.
     pub fn generate_subsets(&self) -> Vec<HintSubset> {
+        self.generate_subsets_range(0, (self.params.num_reg_hints + self.params.num_backup_hints) as usize)
+    }
+
+    /// Generate precomputed subsets for a specific hint range.
+    ///
+    /// For distributed GPU generation: each GPU handles [hint_start, hint_end).
+    pub fn generate_subsets_range(&self, hint_start: usize, hint_end: usize) -> Vec<HintSubset> {
         let p = &self.params;
-        let num_total = (p.num_reg_hints + p.num_backup_hints) as usize;
         let num_reg = p.num_reg_hints as usize;
         let num_blocks = p.num_blocks as u32;
         let block_size = p.block_size as u64;
 
-        (0..num_total)
+        (hint_start..hint_end)
             .into_par_iter()
             .map(|hint_idx| {
                 let select_values = self.prf.select_vector(hint_idx as u32, num_blocks);
