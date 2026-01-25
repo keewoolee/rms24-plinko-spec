@@ -4,9 +4,15 @@
 //!   cargo run --release --features cuda --bin bench_gpu_hints -- \
 //!     --db data/database.bin --lambda 80 --iterations 5
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
 use std::time::Instant;
+
+#[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
+enum Kernel {
+    Old,
+    Warp,
+}
 
 #[derive(Parser)]
 #[command(name = "bench_gpu_hints")]
@@ -35,6 +41,10 @@ struct Args {
     /// Entry size in bytes
     #[arg(long, default_value = "40")]
     entry_size: usize,
+
+    /// GPU kernel to use
+    #[arg(long, value_enum, default_value = "warp")]
+    kernel: Kernel,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -42,6 +52,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("RMS24 GPU Hint Generation Benchmark");
     println!("====================================");
+
+    let kernel_name = match args.kernel {
+        Kernel::Old => "old",
+        Kernel::Warp => "warp",
+    };
+    println!("Kernel: {}", kernel_name);
 
     let db_data = std::fs::read(&args.db)?;
     let num_entries = db_data.len() / args.entry_size;
@@ -68,16 +84,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     #[cfg(feature = "cuda")]
     {
+        use rms24::client::Client;
         use rms24::gpu::{GpuHintGenerator, HintMeta, Rms24Params};
-        use rms24::hints::find_median_cutoff;
+        use rms24::hints::{find_median_cutoff, SubsetData};
         use rms24::prf::Prf;
-
-        // Phase 1 on CPU first (GPU is expensive to initialize)
-        println!("Running Phase 1 (CPU)...");
-        let phase1_start = Instant::now();
-
-        let prf = Prf::random();
-        let prf_key = prf.key_u32();
 
         let gpu_params = Rms24Params {
             num_entries: params.num_entries,
@@ -89,43 +99,76 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             _padding: 0,
         };
 
-        let mut hint_meta = Vec::with_capacity(total_hints as usize);
-        for hint_idx in 0..total_hints {
-            let select_values = prf.select_vector(hint_idx, params.num_blocks as u32);
-            let cutoff = find_median_cutoff(&select_values);
+        println!("Running Phase 1 (CPU)...");
+        let phase1_start = Instant::now();
 
-            let (extra_block, extra_offset) =
-                if cutoff > 0 && (hint_idx as u64) < params.num_reg_hints {
-                    let mut block = 0u32;
-                    for b in 0..params.num_blocks as u32 {
-                        if prf.select(hint_idx, b) >= cutoff {
-                            block = b;
-                            break;
-                        }
-                    }
-                    (block, 0u32)
-                } else {
-                    (0, 0)
-                };
-
-            hint_meta.push(HintMeta {
-                cutoff,
-                extra_block,
-                extra_offset,
-                _padding: 0,
-            });
+        enum Phase1Data {
+            Old {
+                prf_key: [u32; 8],
+                hint_meta: Vec<HintMeta>,
+            },
+            Warp {
+                subset_data: SubsetData,
+            },
         }
+
+        let phase1 = match args.kernel {
+            Kernel::Old => {
+                let prf = Prf::random();
+                let prf_key = prf.key_u32();
+
+                let mut hint_meta = Vec::with_capacity(total_hints as usize);
+                for hint_idx in 0..total_hints {
+                    let select_values = prf.select_vector(hint_idx, params.num_blocks as u32);
+                    let cutoff = find_median_cutoff(&select_values);
+
+                    let (extra_block, extra_offset) =
+                        if cutoff > 0 && (hint_idx as u64) < params.num_reg_hints {
+                            let mut block = 0u32;
+                            for b in 0..params.num_blocks as u32 {
+                                if prf.select(hint_idx, b) >= cutoff {
+                                    block = b;
+                                    break;
+                                }
+                            }
+                            (block, 0u32)
+                        } else {
+                            (0, 0)
+                        };
+
+                    hint_meta.push(HintMeta {
+                        cutoff,
+                        extra_block,
+                        extra_offset,
+                        _padding: 0,
+                    });
+                }
+                Phase1Data::Old { prf_key, hint_meta }
+            }
+            Kernel::Warp => {
+                let client = Client::new(params.clone());
+                let subsets = client.generate_subsets();
+                let subset_data = SubsetData::from_subsets(&subsets);
+                Phase1Data::Warp { subset_data }
+            }
+        };
 
         let phase1_time = phase1_start.elapsed();
         println!("Phase 1 complete: {:.2}s", phase1_time.as_secs_f64());
 
-        // Initialize GPU after CPU work
         println!("\nInitializing GPU...");
         let generator = GpuHintGenerator::new(0)?;
 
         println!("\nWarming up ({} iterations)...", args.warmup);
         for _ in 0..args.warmup {
-            let _ = generator.generate_hints(&db_data, &prf_key, &hint_meta, gpu_params)?;
+            match &phase1 {
+                Phase1Data::Old { prf_key, hint_meta } => {
+                    let _ = generator.generate_hints(&db_data, prf_key, hint_meta, gpu_params)?;
+                }
+                Phase1Data::Warp { subset_data } => {
+                    let _ = generator.generate_hints_warp(&db_data, subset_data, gpu_params)?;
+                }
+            }
         }
 
         println!("\nBenchmarking ({} iterations)...", args.iterations);
@@ -133,7 +176,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         for i in 0..args.iterations {
             let start = Instant::now();
-            let _ = generator.generate_hints(&db_data, &prf_key, &hint_meta, gpu_params)?;
+            match &phase1 {
+                Phase1Data::Old { prf_key, hint_meta } => {
+                    let _ = generator.generate_hints(&db_data, prf_key, hint_meta, gpu_params)?;
+                }
+                Phase1Data::Warp { subset_data } => {
+                    let _ = generator.generate_hints_warp(&db_data, subset_data, gpu_params)?;
+                }
+            }
             let elapsed = start.elapsed();
             times.push(elapsed.as_millis() as f64);
             println!("Iteration {}: {:.2} ms", i + 1, elapsed.as_millis());
@@ -156,6 +206,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     #[cfg(not(feature = "cuda"))]
     {
+        let _ = args.kernel;
         eprintln!("ERROR: CUDA feature not enabled. Rebuild with --features cuda");
         std::process::exit(1);
     }

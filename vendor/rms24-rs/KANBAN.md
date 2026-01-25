@@ -14,17 +14,18 @@
 
 ## In Progress
 
-- [x] Test GPU kernel on Modal H200 (2026-01-25)
-  - 1K hints on 73GB mainnet: 10.2s avg (98 hints/sec)
-  - Bottleneck: 42K blocks per hint, no warp optimization
-  - Next: Add precomputed subsets + warp parallelism
+- [ ] Benchmark warp kernel on Modal H200 (2026-01-25)
+  - Previous (old kernel): 98 hints/sec
+  - New: Precomputed subsets + warp parallelism implemented
+  - Run: `modal run scripts/modal_run_bench.py --gpu h200 --max-hints 1000`
 
 ## Next Up
 
 ### GPU Validation
 - [ ] Verify CPU/GPU parity consistency (same key -> same parities)
-- [ ] Benchmark GPU vs CPU throughput
+- [ ] Benchmark warp kernel vs old kernel throughput
 - [ ] Test with mainnet-v3 dataset (73GB, 1.8B entries)
+- [ ] Implement backup hint high parity in warp kernel (currently TODO)
 
 ### Protocol Completion
 - [ ] Server module (query answering)
@@ -44,15 +45,15 @@
 - [ ] Parallelize Phase 1 with rayon (currently single-threaded)
 - [ ] Cache select_vector results (reused across hints)
 
-**GPU kernel optimizations (to match Plinko's 500K hints/sec):**
-- [ ] Precompute subset bitmasks on CPU, pass to GPU
-  - Current: each hint checks all 42K blocks with PRF
-  - Target: pass precomputed bitmask, only iterate set bits
-- [ ] Warp-level parallelism (like Plinko's `hint_gen_kernel_tiled`)
-  - Share block key loads across 32 threads in warp
-  - Use `__shfl_sync` to broadcast PRF key
+**GPU kernel optimizations:**
+- [x] Precompute subset lists on CPU, pass to GPU
+  - Implemented: `HintSubset` + `SubsetData` structs
+  - GPU receives flattened block/offset arrays
+- [x] Warp-level parallelism (`rms24_hint_gen_warp_kernel`)
+  - 32 threads per hint, strided block processing
+  - Butterfly shuffle reduction (`__shfl_xor_sync`)
 - [ ] Vectorized loads (ulong2) for 16-byte aligned reads
-- [ ] Batch ChaCha12 calls (one block covers multiple PRF outputs)
+- [ ] Coalesced memory access patterns (sort blocks by stride)
 
 **Infrastructure:**
 - [ ] Multi-GPU support in Modal script

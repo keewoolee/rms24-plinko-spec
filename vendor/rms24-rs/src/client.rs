@@ -1,6 +1,6 @@
 //! RMS24 Client with hint generation.
 
-use crate::hints::{find_median_cutoff, xor_bytes_inplace, HintState};
+use crate::hints::{find_median_cutoff, xor_bytes_inplace, HintState, HintSubset};
 use crate::params::Params;
 use crate::prf::Prf;
 use rand::Rng;
@@ -23,6 +23,55 @@ impl Client {
             params.entry_size,
         );
         Self { params, prf, hints }
+    }
+
+    /// Generate precomputed subsets for GPU hint generation.
+    ///
+    /// Phase 1 only: computes cutoffs and subset membership.
+    /// Does NOT stream database or compute parities.
+    pub fn generate_subsets(&self) -> Vec<HintSubset> {
+        let p = &self.params;
+        let num_total = (p.num_reg_hints + p.num_backup_hints) as usize;
+        let num_reg = p.num_reg_hints as usize;
+        let num_blocks = p.num_blocks as u32;
+        let block_size = p.block_size as u64;
+
+        let mut rng = rand::thread_rng();
+        let mut subsets = Vec::with_capacity(num_total);
+
+        for hint_idx in 0..num_total {
+            let select_values = self.prf.select_vector(hint_idx as u32, num_blocks);
+            let cutoff = find_median_cutoff(&select_values);
+
+            let mut subset = HintSubset::new();
+            subset.is_regular = hint_idx < num_reg;
+
+            if cutoff == 0 {
+                subsets.push(subset);
+                continue;
+            }
+
+            let mut high_blocks = Vec::new();
+            for block in 0..num_blocks {
+                let offset = (self.prf.offset(hint_idx as u32, block) % block_size) as u32;
+                if select_values[block as usize] < cutoff {
+                    subset.blocks.push(block);
+                    subset.offsets.push(offset);
+                } else {
+                    high_blocks.push((block, offset));
+                }
+            }
+
+            if hint_idx < num_reg && !high_blocks.is_empty() {
+                let idx = rng.gen_range(0..high_blocks.len());
+                subset.extra_block = high_blocks[idx].0;
+                subset.extra_offset = rng.gen_range(0..block_size as u32);
+            }
+
+            subsets.push(subset);
+        }
+
+        subsets
     }
 
     /// Generate hints from database bytes.
@@ -140,5 +189,44 @@ mod tests {
         // Most hints should be valid (cutoff > 0)
         let valid_count = client.hints.cutoffs.iter().filter(|&&c| c > 0).count();
         assert!(valid_count > 0, "Should have valid hints");
+    }
+
+    #[test]
+    fn test_generate_subsets_basic() {
+        let params = Params::new(100, 40, 2);
+        let client = Client::new(params.clone());
+        let subsets = client.generate_subsets();
+
+        let num_total = (params.num_reg_hints + params.num_backup_hints) as usize;
+        let num_reg = params.num_reg_hints as usize;
+        let num_blocks = params.num_blocks as usize;
+
+        assert_eq!(subsets.len(), num_total);
+
+        for (i, subset) in subsets.iter().enumerate() {
+            if subset.blocks.is_empty() {
+                continue;
+            }
+
+            let subset_size = subset.blocks.len();
+            let expected_half = num_blocks / 2;
+            let lower = expected_half * 80 / 100;
+            let upper = expected_half * 120 / 100;
+            assert!(
+                subset_size >= lower && subset_size <= upper,
+                "Subset {} has {} blocks, expected ~{} (within 20%)",
+                i,
+                subset_size,
+                expected_half
+            );
+
+            if i < num_reg && subset.extra_block != u32::MAX {
+                assert!(
+                    !subset.blocks.contains(&subset.extra_block),
+                    "Extra block {} should be in high subset (not in low)",
+                    subset.extra_block
+                );
+            }
+        }
     }
 }

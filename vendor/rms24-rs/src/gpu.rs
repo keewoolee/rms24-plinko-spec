@@ -7,6 +7,7 @@ use cudarc::driver::{CudaDevice, CudaFunction, CudaSlice, DeviceRepr, LaunchAsyn
 #[cfg(feature = "cuda")]
 use std::sync::Arc;
 
+use crate::hints::SubsetData;
 use crate::params::ENTRY_SIZE;
 
 /// RMS24 parameters for GPU kernel
@@ -56,6 +57,7 @@ unsafe impl DeviceRepr for HintOutput {}
 pub struct GpuHintGenerator {
     device: Arc<CudaDevice>,
     kernel: CudaFunction,
+    warp_kernel: CudaFunction,
 }
 
 #[cfg(feature = "cuda")]
@@ -65,13 +67,25 @@ impl GpuHintGenerator {
         let device = CudaDevice::new(device_ord)?;
 
         let ptx = include_str!(concat!(env!("OUT_DIR"), "/hint_kernel.ptx"));
-        device.load_ptx(ptx.into(), "rms24", &["rms24_hint_gen_kernel"])?;
+        device.load_ptx(
+            ptx.into(),
+            "rms24",
+            &["rms24_hint_gen_kernel", "rms24_hint_gen_warp_kernel"],
+        )?;
 
         let kernel = device
             .get_func("rms24", "rms24_hint_gen_kernel")
             .expect("Failed to get rms24_hint_gen_kernel");
 
-        Ok(Self { device, kernel })
+        let warp_kernel = device
+            .get_func("rms24", "rms24_hint_gen_warp_kernel")
+            .expect("Failed to get rms24_hint_gen_warp_kernel");
+
+        Ok(Self {
+            device,
+            kernel,
+            warp_kernel,
+        })
     }
 
     /// Generate hints using GPU.
@@ -146,6 +160,84 @@ impl GpuHintGenerator {
 
         Ok((output, backup_high))
     }
+
+    /// Generate hints using the warp-based kernel.
+    ///
+    /// Uses precomputed subset data instead of PRF-based selection.
+    /// One warp (32 threads) per hint for coalesced memory access.
+    pub fn generate_hints_warp(
+        &self,
+        entries: &[u8],
+        subset_data: &SubsetData,
+        params: Rms24Params,
+    ) -> Result<Vec<HintOutput>, cudarc::driver::DriverError> {
+        let expected_size = params.num_entries as usize * ENTRY_SIZE;
+        assert_eq!(entries.len(), expected_size, "entries size mismatch");
+
+        let num_hints = subset_data.starts.len();
+
+        // Copy subset data arrays to GPU
+        let d_entries = self.device.htod_sync_copy(entries)?;
+        let d_blocks = self.device.htod_sync_copy(&subset_data.blocks)?;
+        let d_offsets = self.device.htod_sync_copy(&subset_data.offsets)?;
+        let d_starts = self.device.htod_sync_copy(&subset_data.starts)?;
+        let d_sizes = self.device.htod_sync_copy(&subset_data.sizes)?;
+        let d_extra_blocks = self.device.htod_sync_copy(&subset_data.extra_blocks)?;
+        let d_extra_offsets = self.device.htod_sync_copy(&subset_data.extra_offsets)?;
+
+        // Allocate output buffer
+        let mut d_output: CudaSlice<HintOutput> = unsafe { self.device.alloc(num_hints)? };
+
+        // For backup_high_output, pass empty slice (TODO: not implemented yet)
+        let d_backup_high_empty: CudaSlice<HintOutput> = unsafe { self.device.alloc(0)? };
+
+        // Launch config: one warp (32 threads) per hint
+        let cfg = LaunchConfig {
+            grid_dim: (num_hints as u32, 1, 1),
+            block_dim: (32, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        // Launch kernel
+        unsafe {
+            self.warp_kernel.clone().launch(
+                cfg,
+                (
+                    params,
+                    &d_blocks,
+                    &d_offsets,
+                    &d_starts,
+                    &d_sizes,
+                    &d_extra_blocks,
+                    &d_extra_offsets,
+                    &d_entries,
+                    &mut d_output,
+                    &d_backup_high_empty,
+                ),
+            )?;
+        }
+
+        // Copy results back
+        let output = self.device.dtoh_sync_copy(&d_output)?;
+
+        Ok(output)
+    }
+}
+
+/// Convert SubsetData to GPU-compatible arrays.
+/// Returns (blocks, offsets, starts, sizes, extra_blocks, extra_offsets).
+#[cfg(feature = "cuda")]
+pub fn subset_data_to_gpu_arrays(
+    data: &SubsetData,
+) -> (Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>) {
+    (
+        data.blocks.clone(),
+        data.offsets.clone(),
+        data.starts.clone(),
+        data.sizes.clone(),
+        data.extra_blocks.clone(),
+        data.extra_offsets.clone(),
+    )
 }
 
 /// Convert Client's HintState to GPU-compatible HintMeta array

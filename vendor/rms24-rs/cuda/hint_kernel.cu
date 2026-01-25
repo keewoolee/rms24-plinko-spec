@@ -243,3 +243,111 @@ extern "C" __global__ void rms24_hint_gen_kernel(
         high_ptr[5] = 0;
     }
 }
+
+// ============================================================================
+// Warp-Optimized Hint Generation Kernel
+// ============================================================================
+
+/**
+ * Warp-level reduction for 5 x uint64_t parity values.
+ * Uses butterfly shuffle pattern to reduce across all 32 lanes.
+ */
+__device__ __forceinline__ void warp_reduce_parity(uint64_t parity[5]) {
+    #pragma unroll
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        #pragma unroll
+        for (int i = 0; i < 5; i++) {
+            uint32_t lo = (uint32_t)parity[i];
+            uint32_t hi = (uint32_t)(parity[i] >> 32);
+            lo ^= __shfl_xor_sync(0xFFFFFFFF, lo, offset);
+            hi ^= __shfl_xor_sync(0xFFFFFFFF, hi, offset);
+            parity[i] = ((uint64_t)hi << 32) | lo;
+        }
+    }
+}
+
+/**
+ * Warp-optimized hint generation kernel.
+ * 
+ * Each warp (32 threads) processes one hint cooperatively.
+ * Subsets are precomputed on CPU - no PRF calls needed.
+ *
+ * Launch config: grid=(num_hints, 1, 1), block=(32, 1, 1)
+ *
+ * Memory layout for subset arrays:
+ * - subset_starts[hint_idx]: starting index into subset_blocks/subset_offsets
+ * - subset_sizes[hint_idx]: number of blocks in this hint's subset
+ * - subset_blocks[start..start+size]: block indices for this hint
+ * - subset_offsets[start..start+size]: entry offsets within each block
+ */
+extern "C" __global__ void rms24_hint_gen_warp_kernel(
+    const Rms24Params params,
+    const uint32_t* __restrict__ subset_blocks,    // Flattened block indices
+    const uint32_t* __restrict__ subset_offsets,   // Flattened offsets
+    const uint32_t* __restrict__ subset_starts,    // Start index per hint
+    const uint32_t* __restrict__ subset_sizes,     // Number of blocks per hint
+    const uint32_t* __restrict__ extra_blocks,     // Extra block per hint (UINT32_MAX if none)
+    const uint32_t* __restrict__ extra_offsets,    // Extra offset per hint
+    const uint8_t* __restrict__ entries,
+    HintOutput* __restrict__ output,
+    HintOutput* __restrict__ backup_high_output    // For backup hints only (TODO: not implemented)
+) {
+    uint32_t hint_idx = blockIdx.x;
+    uint32_t lane = threadIdx.x;
+
+    if (hint_idx >= params.total_hints) return;
+
+    uint32_t start = subset_starts[hint_idx];
+    uint32_t size = subset_sizes[hint_idx];
+
+    uint64_t parity[5] = {0, 0, 0, 0, 0};
+
+    // Each lane processes a strided subset of blocks
+    for (uint32_t i = lane; i < size; i += WARP_SIZE) {
+        uint32_t block_idx = subset_blocks[start + i];
+        uint32_t offset = subset_offsets[start + i];
+
+        uint64_t entry_idx = (uint64_t)block_idx * params.block_size + offset;
+        if (entry_idx >= params.num_entries) continue;
+
+        const uint64_t* entry_ptr = (const uint64_t*)(entries + entry_idx * ENTRY_SIZE);
+        parity[0] ^= entry_ptr[0];
+        parity[1] ^= entry_ptr[1];
+        parity[2] ^= entry_ptr[2];
+        parity[3] ^= entry_ptr[3];
+        parity[4] ^= entry_ptr[4];
+    }
+
+    // Warp reduction: XOR all lanes' parities together
+    warp_reduce_parity(parity);
+
+    // Lane 0 handles extra entry and writes output
+    if (lane == 0) {
+        uint32_t extra_block = extra_blocks[hint_idx];
+        if (extra_block != UINT32_MAX) {
+            uint32_t extra_offset = extra_offsets[hint_idx];
+            uint64_t extra_entry_idx = (uint64_t)extra_block * params.block_size + extra_offset;
+            if (extra_entry_idx < params.num_entries) {
+                const uint64_t* entry_ptr = (const uint64_t*)(entries + extra_entry_idx * ENTRY_SIZE);
+                parity[0] ^= entry_ptr[0];
+                parity[1] ^= entry_ptr[1];
+                parity[2] ^= entry_ptr[2];
+                parity[3] ^= entry_ptr[3];
+                parity[4] ^= entry_ptr[4];
+            }
+        }
+
+        uint64_t* out_ptr = (uint64_t*)output[hint_idx].parity;
+        out_ptr[0] = parity[0];
+        out_ptr[1] = parity[1];
+        out_ptr[2] = parity[2];
+        out_ptr[3] = parity[3];
+        out_ptr[4] = parity[4];
+        out_ptr[5] = 0;  // Padding
+    }
+
+    // TODO: Backup hints need high parity (blocks NOT in subset).
+    // For now, backup hints should use the original kernel or
+    // precompute both subsets on CPU.
+    (void)backup_high_output;
+}
