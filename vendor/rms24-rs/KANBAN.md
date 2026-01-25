@@ -105,11 +105,18 @@ modal run scripts/modal_run_bench.py --gpu h200 --db /data/mainnet-v3/database.b
 
 ### Benchmark Results (2026-01-25)
 
+**Old kernel (PRF on GPU):**
 | Config | Hints | GPU Time | Throughput |
 |--------|-------|----------|------------|
 | H200, 73GB mainnet, 42K blocks | 1,000 | 10.2s | 98 hints/sec |
 
-**Bottlenecks identified:**
-1. No precomputed subsets (each hint checks all 42K blocks)
-2. No warp-level parallelism (Plinko shares key loads)
-3. Phase 1 CPU slow (4.3s for 1K hints)
+**Warp kernel (precomputed subsets):**
+| Config | Hints | GPU Time | Throughput |
+|--------|-------|----------|------------|
+| H200, 100MB synthetic, 1.6K blocks | 100 | 51ms | 1,974 hints/sec |
+| H200, 1GB synthetic, 5.1K blocks | 1,000 | 1.17s | 854 hints/sec |
+
+**Bottlenecks remaining:**
+1. Phase 1 CPU still slow (66s for 1K hints on 5K blocks) - rayon helps but PRF is sequential
+2. GPU throughput scales with batch size (more hints = better occupancy)
+3. Memory transfer overhead for small batches
