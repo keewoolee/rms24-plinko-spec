@@ -87,6 +87,28 @@ def test_filter_storage_mapping_file_invalid_length_raises(tmp_path: Path):
         data_slice.filter_storage_mapping_file(src, max_index=10, out_path=out)
 
 
+def test_filter_account_mapping_file_invalid_chunk_records_raises(tmp_path: Path):
+    record = lambda addr, idx: addr + idx.to_bytes(4, "little")
+    data = record(b"a" * 20, 3)
+    src = tmp_path / "account.bin"
+    out = tmp_path / "account_out.bin"
+    src.write_bytes(data)
+
+    with pytest.raises(ValueError):
+        data_slice.filter_account_mapping_file(src, max_index=10, out_path=out, chunk_records=0)
+
+
+def test_filter_storage_mapping_file_invalid_chunk_records_raises(tmp_path: Path):
+    record = lambda addr, slot, idx: addr + slot + idx.to_bytes(4, "little")
+    data = record(b"a" * 20, b"s" * 32, 3)
+    src = tmp_path / "storage.bin"
+    out = tmp_path / "storage_out.bin"
+    src.write_bytes(data)
+
+    with pytest.raises(ValueError):
+        data_slice.filter_storage_mapping_file(src, max_index=10, out_path=out, chunk_records=0)
+
+
 def test_write_metadata(tmp_path: Path):
     db = tmp_path / "database.bin"
     payload_bytes = b"x" * 40
@@ -104,6 +126,7 @@ def test_write_metadata(tmp_path: Path):
     payload = json.loads(meta.read_text())
     assert payload["entries"] == 1
     assert payload["entry_size"] == 40
+    assert payload["source"] == "mainnet-v3"
     assert "database.bin" in payload["files"]
     assert payload["files"]["database.bin"]["bytes"] == 40
     assert payload["files"]["database.bin"]["sha256"] == hashlib.sha256(payload_bytes).hexdigest()

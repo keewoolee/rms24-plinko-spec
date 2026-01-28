@@ -33,6 +33,8 @@ def filter_storage_mapping_bytes(data: bytes, max_index: int, out_path: Path) ->
 def filter_account_mapping_file(
     path: Path, max_index: int, out_path: Path, *, chunk_records: int = 4096
 ) -> None:
+    if chunk_records <= 0:
+        raise ValueError("chunk_records must be positive")
     size = path.stat().st_size
     if size % ACCOUNT_RECORD_SIZE != 0:
         raise ValueError("account mapping data length is not aligned to record size")
@@ -54,6 +56,8 @@ def filter_account_mapping_file(
 def filter_storage_mapping_file(
     path: Path, max_index: int, out_path: Path, *, chunk_records: int = 4096
 ) -> None:
+    if chunk_records <= 0:
+        raise ValueError("chunk_records must be positive")
     size = path.stat().st_size
     if size % STORAGE_RECORD_SIZE != 0:
         raise ValueError("storage mapping data length is not aligned to record size")
@@ -70,6 +74,8 @@ def filter_storage_mapping_file(
                 idx = int.from_bytes(record[52:56], "little")
                 if idx < max_index:
                     out.write(record)
+
+
 
 def sha256_file(path: Path) -> str:
     h = hashlib.sha256()
