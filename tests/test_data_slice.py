@@ -8,7 +8,7 @@ from scripts import data_slice
 
 
 def test_filter_account_mapping_by_index(tmp_path: Path):
-    # 2 records: idx 5 and idx 12
+    # 3 records: idx 5, idx 10, and idx 12
     record = lambda addr, idx: addr + idx.to_bytes(4, "little")
     data = record(b"a" * 20, 5) + record(b"b" * 20, 10) + record(b"c" * 20, 12)
     out = tmp_path / "account.bin"
@@ -16,6 +16,16 @@ def test_filter_account_mapping_by_index(tmp_path: Path):
     data_slice.filter_account_mapping_bytes(data, max_index=10, out_path=out)
 
     assert out.read_bytes() == record(b"a" * 20, 5)
+
+
+def test_filter_account_mapping_excludes_max_index(tmp_path: Path):
+    record = lambda addr, idx: addr + idx.to_bytes(4, "little")
+    data = record(b"a" * 20, 10)
+    out = tmp_path / "account.bin"
+
+    data_slice.filter_account_mapping_bytes(data, max_index=10, out_path=out)
+
+    assert out.read_bytes() == b""
 
 
 def test_filter_storage_mapping_by_index(tmp_path: Path):
