@@ -382,3 +382,33 @@ def test_make_slice_cli_rejects_unaligned_storage_mapping(tmp_path: Path):
 
     assert proc.returncode == 2
     assert "storage-mapping.bin size" in proc.stderr
+
+
+def test_make_slice_cli_cleans_outputs_on_failure(tmp_path: Path):
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "scripts" / "make_mainnet_slice.py"
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    (source_dir / "database.bin").write_bytes(b"a" * 40)
+    (source_dir / "account-mapping.bin").write_bytes(b"x" * 23)
+    (source_dir / "storage-mapping.bin").write_bytes(b"z" * 56)
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    cmd = [
+        sys.executable,
+        str(script_path),
+        "--source",
+        str(source_dir),
+        "--out",
+        str(out_dir),
+        "--entries",
+        "1",
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+
+    assert proc.returncode == 2
+    assert not (out_dir / "database.bin").exists()
+    assert not (out_dir / "account-mapping.bin").exists()
+    assert not (out_dir / "storage-mapping.bin").exists()
+    assert not (out_dir / "metadata.json").exists()

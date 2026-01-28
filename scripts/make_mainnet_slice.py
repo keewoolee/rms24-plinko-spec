@@ -65,6 +65,14 @@ def copy_db_slice(source_db: Path, out_db: Path, entries: int) -> None:
         raise
 
 
+def cleanup_outputs(paths: list[Path]) -> None:
+    for path in paths:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--source", required=True, help="Source directory with database.bin and mappings")
@@ -90,42 +98,42 @@ def main() -> None:
             f"database.bin size {db_size} is smaller than required {required_bytes}"
         )
 
-    try:
-        copy_db_slice(source_db, out / "database.bin", args.entries)
-    except ValueError as exc:
-        parser.error(str(exc))
-
     require_aligned(parser, account_mapping, data_slice.ACCOUNT_RECORD_SIZE)
     require_aligned(parser, storage_mapping, data_slice.STORAGE_RECORD_SIZE)
 
     try:
+        copy_db_slice(source_db, out / "database.bin", args.entries)
         data_slice.filter_account_mapping_file(
             account_mapping,
             max_index=args.entries,
             out_path=out / "account-mapping.bin",
         )
-    except ValueError as exc:
-        parser.error(str(exc))
-    try:
         data_slice.filter_storage_mapping_file(
             storage_mapping,
             max_index=args.entries,
             out_path=out / "storage-mapping.bin",
         )
+        data_slice.write_metadata(
+            meta_path=out / "metadata.json",
+            entries=args.entries,
+            entry_size=ENTRY_SIZE,
+            files={
+                "database.bin": out / "database.bin",
+                "account-mapping.bin": out / "account-mapping.bin",
+                "storage-mapping.bin": out / "storage-mapping.bin",
+            },
+            source_tag="mainnet-v3",
+        )
     except ValueError as exc:
+        cleanup_outputs(
+            [
+                out / "database.bin",
+                out / "account-mapping.bin",
+                out / "storage-mapping.bin",
+                out / "metadata.json",
+            ]
+        )
         parser.error(str(exc))
-
-    data_slice.write_metadata(
-        meta_path=out / "metadata.json",
-        entries=args.entries,
-        entry_size=ENTRY_SIZE,
-        files={
-            "database.bin": out / "database.bin",
-            "account-mapping.bin": out / "account-mapping.bin",
-            "storage-mapping.bin": out / "storage-mapping.bin",
-        },
-        source_tag="mainnet-v3",
-    )
 
 
 if __name__ == "__main__":
