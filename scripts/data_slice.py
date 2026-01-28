@@ -30,6 +30,47 @@ def filter_storage_mapping_bytes(data: bytes, max_index: int, out_path: Path) ->
                 out.write(record)
 
 
+def filter_account_mapping_file(
+    path: Path, max_index: int, out_path: Path, *, chunk_records: int = 4096
+) -> None:
+    size = path.stat().st_size
+    if size % ACCOUNT_RECORD_SIZE != 0:
+        raise ValueError("account mapping data length is not aligned to record size")
+    chunk_size = ACCOUNT_RECORD_SIZE * chunk_records
+    with path.open("rb") as src, out_path.open("wb") as out:
+        while True:
+            chunk = src.read(chunk_size)
+            if not chunk:
+                break
+            if len(chunk) % ACCOUNT_RECORD_SIZE != 0:
+                raise ValueError("account mapping data length is not aligned to record size")
+            for i in range(0, len(chunk), ACCOUNT_RECORD_SIZE):
+                record = chunk[i : i + ACCOUNT_RECORD_SIZE]
+                idx = int.from_bytes(record[20:24], "little")
+                if idx < max_index:
+                    out.write(record)
+
+
+def filter_storage_mapping_file(
+    path: Path, max_index: int, out_path: Path, *, chunk_records: int = 4096
+) -> None:
+    size = path.stat().st_size
+    if size % STORAGE_RECORD_SIZE != 0:
+        raise ValueError("storage mapping data length is not aligned to record size")
+    chunk_size = STORAGE_RECORD_SIZE * chunk_records
+    with path.open("rb") as src, out_path.open("wb") as out:
+        while True:
+            chunk = src.read(chunk_size)
+            if not chunk:
+                break
+            if len(chunk) % STORAGE_RECORD_SIZE != 0:
+                raise ValueError("storage mapping data length is not aligned to record size")
+            for i in range(0, len(chunk), STORAGE_RECORD_SIZE):
+                record = chunk[i : i + STORAGE_RECORD_SIZE]
+                idx = int.from_bytes(record[52:56], "little")
+                if idx < max_index:
+                    out.write(record)
+
 def sha256_file(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as f:
@@ -48,4 +89,4 @@ def write_metadata(meta_path: Path, entries: int, entry_size: int, files: dict[s
             for name, path in files.items()
         },
     }
-    meta_path.write_text(json.dumps(meta, indent=2, sort_keys=True))
+    meta_path.write_text(json.dumps(meta, indent=2, sort_keys=True), encoding="utf-8")
