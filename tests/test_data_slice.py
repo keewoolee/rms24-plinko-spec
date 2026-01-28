@@ -438,3 +438,28 @@ def test_make_slice_cli_rejects_out_inside_source(tmp_path: Path):
 
     assert proc.returncode == 2
     assert "output directory must be outside" in proc.stderr
+
+
+def test_download_helper_validates_checksum(tmp_path: Path):
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    data = b"abc"
+    file_path = out_dir / "database.bin"
+    file_path.write_bytes(data)
+
+    meta = {
+        "entries": 1,
+        "entry_size": 40,
+        "files": {
+            "database.bin": {
+                "sha256": hashlib.sha256(data).hexdigest(),
+                "bytes": 3,
+            }
+        },
+    }
+    meta_path = out_dir / "metadata.json"
+    meta_path.write_text(json.dumps(meta))
+
+    from scripts import download_slice
+
+    download_slice.verify_files(out_dir, meta)
