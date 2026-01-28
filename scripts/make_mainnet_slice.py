@@ -29,12 +29,10 @@ def require_file(parser: argparse.ArgumentParser, path: Path) -> None:
         parser.error(f"missing required file: {path.name}")
 
 
-def require_aligned(
-    parser: argparse.ArgumentParser, path: Path, record_size: int
-) -> None:
+def require_aligned(path: Path, record_size: int) -> None:
     size = path.stat().st_size
     if size % record_size != 0:
-        parser.error(
+        raise ValueError(
             f"{path.name} size {size} is not aligned to record size {record_size}"
         )
 
@@ -91,6 +89,14 @@ def main() -> None:
     require_file(parser, account_mapping)
     require_file(parser, storage_mapping)
 
+    source_resolved = source.resolve()
+    out_resolved = out.resolve()
+    try:
+        out_resolved.relative_to(source_resolved)
+        parser.error("output directory must be outside source directory")
+    except ValueError:
+        pass
+
     required_bytes = args.entries * ENTRY_SIZE
     db_size = source_db.stat().st_size
     if db_size < required_bytes:
@@ -98,11 +104,10 @@ def main() -> None:
             f"database.bin size {db_size} is smaller than required {required_bytes}"
         )
 
-    require_aligned(parser, account_mapping, data_slice.ACCOUNT_RECORD_SIZE)
-    require_aligned(parser, storage_mapping, data_slice.STORAGE_RECORD_SIZE)
-
     try:
         copy_db_slice(source_db, out / "database.bin", args.entries)
+        require_aligned(account_mapping, data_slice.ACCOUNT_RECORD_SIZE)
+        require_aligned(storage_mapping, data_slice.STORAGE_RECORD_SIZE)
         data_slice.filter_account_mapping_file(
             account_mapping,
             max_index=args.entries,
@@ -124,7 +129,7 @@ def main() -> None:
             },
             source_tag="mainnet-v3",
         )
-    except ValueError as exc:
+    except Exception as exc:
         cleanup_outputs(
             [
                 out / "database.bin",
