@@ -1,5 +1,7 @@
 import hashlib
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -140,3 +142,39 @@ def test_write_metadata(tmp_path: Path):
     assert "database.bin" in payload["files"]
     assert payload["files"]["database.bin"]["bytes"] == 40
     assert payload["files"]["database.bin"]["sha256"] == hashlib.sha256(payload_bytes).hexdigest()
+
+
+def test_make_slice_cli(tmp_path: Path):
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+
+    # Create tiny mock DB (3 entries)
+    (source_dir / "database.bin").write_bytes(b"a" * 40 + b"b" * 40 + b"c" * 40)
+    # Account mapping: two records with indices 0 and 2
+    (source_dir / "account-mapping.bin").write_bytes(
+        b"x" * 20 + (0).to_bytes(4, "little") + b"y" * 20 + (2).to_bytes(4, "little")
+    )
+    # Storage mapping: one record with index 1
+    (source_dir / "storage-mapping.bin").write_bytes(
+        b"z" * 20 + b"s" * 32 + (1).to_bytes(4, "little")
+    )
+
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    cmd = [
+        sys.executable,
+        "scripts/make_mainnet_slice.py",
+        "--source",
+        str(source_dir),
+        "--out",
+        str(out_dir),
+        "--entries",
+        "2",
+    ]
+    subprocess.check_call(cmd)
+
+    assert (out_dir / "database.bin").stat().st_size == 2 * 40
+    assert (out_dir / "account-mapping.bin").stat().st_size == 24  # idx 0 only
+    assert (out_dir / "storage-mapping.bin").stat().st_size == 56  # idx 1 only
+    assert (out_dir / "metadata.json").exists()
