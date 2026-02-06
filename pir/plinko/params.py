@@ -1,8 +1,5 @@
 """
-Parameters for the RMS24 PIR scheme.
-
-Based on "Simple and Practical Amortized Sublinear Private Information
-Retrieval" (https://eprint.iacr.org/2023/1072).
+Parameters for the Plinko PIR scheme.
 
 Key parameters:
 - num_entries: Total number of database entries
@@ -26,7 +23,7 @@ import math
 
 @dataclass
 class Params:
-    """Parameters for RMS24 PIR scheme."""
+    """Parameters for Plinko PIR scheme."""
 
     num_entries: int  # Number of database entries
     entry_size: int  # Size of each entry in bytes

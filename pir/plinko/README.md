@@ -1,14 +1,18 @@
-# RMS24 Single-Server PIR
+# Plinko Single-Server PIR
 
-Implementation of the RMS24 scheme from ["Simple and Practical Amortized Sublinear Private Information Retrieval"](https://eprint.iacr.org/2023/1072).
+Implementation of the Plinko scheme from ["Plinko: Single-Server PIR with Efficient Updates via Invertible PRFs"](https://eprint.iacr.org/2024/318).
 
 ## Overview
 
-RMS24 achieves sublinear online query time through client-dependent preprocessing:
+Plinko achieves Õ(1) hint operations using Invertible PRFs (iPRFs):
 
 - **Offline**: Client streams database to build hints
 - **Online**: Each query uses O(√num_entries) communication and server computation
+- **Hint search**: Õ(1) via iPRF inverse (vs O(num_hints) linear scan in RMS24)
+- **Hint update**: Õ(1) via iPRF inverse (vs O(num_hints) linear scan in RMS24)
 - **Capacity**: Supports O(√num_entries) queries before re-running offline phase
+
+**Trade-off**: The iPRF construction has significant concrete overhead. See benchmarks in main README.
 
 ## Parameters
 
@@ -27,12 +31,6 @@ Params(
 - `num_reg_hints` = security_param × block_size
 - `num_backup_hints` = number of queries supported per offline phase
 
-**Tradeoffs:**
-- Larger `block_size` → smaller queries, more hints to store
-- Larger `security_param` → lower failure probability, more hints
-- Larger `num_backup_hints` → more queries per offline phase, more storage
-- Default `block_size = √num_entries` balances query size and storage to O(√num_entries)
-
 ## Files
 
 | File | Description |
@@ -41,7 +39,40 @@ Params(
 | `client.py` | Hint generation, query preparation, result extraction |
 | `server.py` | Database storage, query answering |
 | `messages.py` | Query and Response dataclasses |
-| `utils.py` | SHAKE-256 based PRF and XOR utilities |
+| `utils.py` | SHAKE-256 based PRF/PRG and XOR utilities |
+| `iprf.py` | Invertible PRF (iPRF) composition |
+| `prp.py` | Small-domain PRP via Sometimes-Recurse Shuffle (MR14) |
+| `pmns.py` | Pseudorandom Multinomial Sampler |
+
+## Invertible PRF (iPRF)
+
+The key innovation enabling Õ(1) operations. For each block α, an iPRF maps hint indices to offsets:
+
+```
+F_α: [num_total_hints] → [block_size]
+```
+
+**Composition** (Theorem 4.4 in Plinko paper):
+```
+F(x) = S(P(x))                           // Forward: PRP then PMNS
+F⁻¹(y) = {P⁻¹(z) : z ∈ S⁻¹(y)}          // Inverse: PMNS⁻¹ then PRP⁻¹
+```
+
+Where:
+- **PRP**: Fully-secure small-domain pseudorandom permutation (Sometimes-Recurse Shuffle from MR14)
+- **PMNS**: Pseudorandom Multinomial Sampler
+
+**Note**: Security requires a fully-secure small-domain PRP. We use MR14's Sometimes-Recurse Shuffle, which appears to be the only known construction.
+
+## Query Cache
+
+In Plinko, the query cache is a **required mechanism** (not optional):
+
+- Extra entries of promoted hints cannot be tracked by iPRF inverse
+- Without the cache, updating extra entries would require O(num_hints) scan, nullifying the Õ(1) benefit
+- The cache stores `index → (answer, promoted_hint_idx)` for:
+  1. **Update by extra**: Õ(1) lookup of hints whose extra entry changed
+  2. **Repeated queries**: Return cached answer, query a decoy index to maintain privacy
 
 ## Hint Structure
 
@@ -49,20 +80,14 @@ Hints are stored in `HintState` using parallel arrays (index = hint_id):
 
 **Regular hints** (indices 0 to num_reg_hints-1):
 - `cutoffs[i]`: Median value splitting blocks into two halves (0 = consumed)
-- `extras[i]`: Index of extra entry from an unselected block
 - `parities[i]`: XOR of entries in the hint's subset
 - `flips[i]`: Selection direction (inverted after promotion from backup)
 
-A regular hint's subset contains `num_blocks/2 + 1` entries:
-- One entry from each "selected" block (where `PRF(hint_id, block) < cutoff`, or `>= cutoff` if flipped)
-- One extra entry from an "unselected" block
-
 **Backup hints** (indices num_reg_hints to num_total_hints-1):
 - `cutoffs[i]`: Same as regular hints
+- `extras[i - num_reg_hints]`: Extra entry index (set during promotion)
 - `parities[i]`: XOR of entries from blocks where `PRF < cutoff`
 - `backup_parities_high[i - num_reg_hints]`: XOR of entries from blocks where `PRF >= cutoff`
-
-When a backup hint is promoted to regular, it picks one of the two parities based on whether the queried block is selected, and sets `flips[i]` accordingly.
 
 ## Protocol
 
@@ -73,8 +98,8 @@ Client                                  Server
   |                                       |
   |  <------- blocks[0..num_blocks-1] --- |
   |                                       |
-  [generate_hints: build num_reg_hints    |
-   regular + backup hints]                |
+  [generate_hints: build hints using      |
+   iPRF to map hints to offsets]          |
 ```
 
 ### Online Phase (Query)
@@ -82,22 +107,17 @@ Client                                  Server
 ```
 Client                                  Server
   |                                       |
-  [find hint containing index i]          |
-  [build query hiding i in hint subset]   |
+  [Õ(1) hint search via iPRF inverse]     |
+  [build query hiding index in subset]    |
   |                                       |
   |  -------- Query(mask, offsets) -----> |
-  |    mask: bitmask assigning blocks     |
-  |          to subset 0 or 1             |
-  |    offsets: position within each block|
   |                                       |
-  |           [compute parity_0, parity_1:|
-  |            XOR of entries at offsets  |
-  |            for each subset]           |
+  |           [compute parity_0, parity_1]|
   |                                       |
   |  <------- Response(p0, p1) ---------- |
   |                                       |
   [extract: result = parity XOR hint.parity]
-  [replenish: convert backup → regular]   |
+  [replenish + update query cache]        |
 ```
 
 ## Security
@@ -108,7 +128,7 @@ The query hides which entry is accessed:
 3. Offsets are shared between subsets, revealing no information
 4. Server sees two equal-sized subsets and cannot distinguish which is real
 
-The PRF key is client-secret. All hint data must remain private.
+The PRF/iPRF keys are client-secret. All hint data must remain private.
 
 ## Communication Costs
 
@@ -117,14 +137,12 @@ The PRF key is client-secret. All hint data must remain private.
 | Query | ⌈num_blocks/8⌉ bytes (mask) + num_blocks/2 offsets |
 | Response | 2 × entry_size bytes |
 
-With default `block_size = √num_entries`:
-- Query: O(√num_entries) bytes
-- Response: O(entry_size) bytes
+Communication is identical to RMS24. The Õ(1) advantage is in client computation, not communication.
 
 ## Example
 
 ```python
-from pir.rms24 import Params, Client, Server
+from pir.plinko import Params, Client, Server
 
 # 1000 entries × 32 bytes
 params = Params(num_entries=1000, entry_size=32)
@@ -136,7 +154,7 @@ client = Client(params)
 
 client.generate_hints(server.stream_database())  # Offline
 
-queries = client.query([42, 100, 999])           # Online
+queries = client.query([42, 100, 999])           # Online (Õ(1) hint search)
 responses = server.answer(queries)
 results = client.extract(responses)
 client.replenish_hints()
@@ -146,13 +164,13 @@ print(f"Remaining queries: {client.remaining_queries()}")
 
 ## Updates
 
-Database updates are supported without re-running offline phase:
+Database updates use Õ(1) hint updates via iPRF inverse:
 
 ```python
 # Server updates entries
 updates = server.update_entries({0: new_value, 5: another_value})
 
-# Client updates affected hints
+# Client updates affected hints in Õ(1) time
 client.update_hints(updates)
 ```
 

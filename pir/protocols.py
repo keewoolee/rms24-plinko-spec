@@ -4,6 +4,7 @@ Protocols and messages for Piano-like PIR schemes (client-dependent preprocessin
 This module defines:
 1. Message protocols: Query, Response, EntryUpdate
 2. Protocol interfaces: PIRClient, PIRServer, PIRParams
+3. Module interface: PIRModule (what a PIR module must export)
 
 Piano-like PIR schemes (Piano, RMS24, Plinko, etc.) share these interfaces,
 allowing different implementations to be used interchangeably.
@@ -15,7 +16,8 @@ Client-dependent preprocessing model:
 - Update: When database entries change, client must update affected hints
 """
 
-from typing import Protocol, Iterator
+from collections.abc import Iterator
+from typing import Protocol, Any
 
 
 # =============================================================================
@@ -68,12 +70,12 @@ class PIRClient(Protocol):
     3. Updates: update_hints() when database changes
     """
 
-    def generate_hints(self, db_stream: Iterator[list[bytes]]) -> None:
+    def generate_hints(self, db_stream: Iterator[bytes]) -> None:
         """
         Offline phase: process database and generate hints.
 
         Args:
-            db_stream: Iterator yielding entries for each block
+            db_stream: Iterator yielding each entry in order
         """
         ...
 
@@ -135,14 +137,14 @@ class PIRServer(Protocol):
     3. Updating entries and returning update info for client hints
     """
 
-    def stream_database(self) -> Iterator[list[bytes]]:
+    def stream_database(self) -> Iterator[bytes]:
         """
-        Stream the database block by block.
+        Stream the database entry by entry.
 
         Used during the client's offline phase.
 
         Yields:
-            Entries for each block, in order
+            Each entry in order (index 0, 1, 2, ...)
         """
         ...
 
@@ -186,4 +188,48 @@ class PIRParams(Protocol):
     @property
     def entry_size(self) -> int:
         """Size of each entry in bytes."""
+        ...
+
+
+# =============================================================================
+# Module Interface
+# =============================================================================
+
+
+class PIRModule(Protocol):
+    """
+    Protocol for PIR modules (e.g., rms24, plinko).
+
+    A PIR module must export:
+    - Client: PIR client class that takes (params) as constructor argument
+    - Server: PIR server class that takes (database, params) as constructor arguments
+    - create_params: Factory function to create PIR parameters
+
+    Example usage:
+        from pir import rms24  # or plinko
+
+        params = rms24.create_params(num_entries=1000, entry_size=32, security_param=128)
+        client = rms24.Client(params)
+        server = rms24.Server(database, params)
+    """
+
+    Client: type
+    """PIR client class. Constructor: Client(params: PIRParams) -> PIRClient"""
+
+    Server: type
+    """PIR server class. Constructor: Server(database: list[bytes], params: PIRParams) -> PIRServer"""
+
+    @staticmethod
+    def create_params(num_entries: int, entry_size: int, **kwargs: Any) -> PIRParams:
+        """
+        Create PIR parameters.
+
+        Args:
+            num_entries: Number of database entries
+            entry_size: Size of each entry in bytes
+            **kwargs: Scheme-specific options (e.g., security_param, block_size)
+
+        Returns:
+            Configured PIR parameters
+        """
         ...

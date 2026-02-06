@@ -6,7 +6,6 @@ are managed separately by the specific PIR scheme being used.
 """
 
 from dataclasses import dataclass
-from typing import Optional
 
 from .cuckoo import CuckooParams
 
@@ -18,10 +17,9 @@ class KPIRParams:
     num_items_expected: int  # Expected number of key-value pairs (for sizing)
     key_size: int = 32  # Size of keys in bytes
     value_size: int = 32  # Size of values in bytes
+    expansion_factor: int = 3  # OPT: conservative. num_buckets = expansion_factor * num_items_expected
     num_hashes: int = 2  # Cuckoo hash functions
-    expansion_factor: int = 3  # num_buckets = expansion_factor * num_items_expected
     max_evictions: int = 100  # Max eviction chain length before using stash
-    cuckoo_seed: Optional[bytes] = None  # Hash seed (generated if not provided)
 
     def __post_init__(self):
         if self.num_items_expected < 1:
@@ -39,10 +37,7 @@ class KPIRParams:
             value_size=self.value_size,
             num_hashes=self.num_hashes,
             max_evictions=self.max_evictions,
-            seed=self.cuckoo_seed,
         )
-        # Sync back (in case seed was generated)
-        self.cuckoo_seed = self.cuckoo_params.seed
 
     @property
     def num_buckets(self) -> int:

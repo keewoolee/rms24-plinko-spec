@@ -9,7 +9,6 @@ dense index PIR.
 import hashlib
 import secrets
 from dataclasses import dataclass
-from typing import Optional
 
 
 @dataclass
@@ -21,23 +20,21 @@ class CuckooParams:
     value_size: int  # Size of values in bytes
     num_hashes: int  # Number of hash functions
     max_evictions: int = 100  # Max eviction chain length before using stash
-    seed: Optional[bytes] = None  # Hash seed (generated if not provided)
 
     def __post_init__(self):
-        if self.key_size < 2:
-            raise ValueError("key_size must be at least 2")
+        if self.key_size < 1:
+            raise ValueError("key_size must be at least 1")
         if self.value_size < 1:
             raise ValueError("value_size must be at least 1")
         if self.num_hashes < 2:
             raise ValueError("num_hashes must be at least 2")
         if self.num_buckets < 1:
             raise ValueError("num_buckets must be at least 1")
-        if self.seed is None:
-            self.seed = secrets.token_bytes(16)
+        self.seed = secrets.token_bytes(16)
 
     @property
     def entry_size(self) -> int:
-        """Size of each bucket (key || value)."""
+        """Size of each bucket (key || value). OPT: could use shorter fingerprints instead of full keys."""
         return self.key_size + self.value_size
 
 
@@ -45,8 +42,8 @@ class CuckooHash:
     """
     Cuckoo hash functions.
 
-    Uses SHA256 with different prefixes to create num_hashes independent hash functions.
-    Note: A cryptographic hash is not required; SHA256 is used for convenience.
+    Uses SHAKE-256 with different prefixes to create num_hashes independent hash functions.
+    OPT: A cryptographic hash is not required; SHAKE-256 is used for consistency.
     """
 
     def __init__(self, num_hashes: int, num_buckets: int, seed: bytes):
@@ -73,14 +70,8 @@ class CuckooHash:
         Returns:
             Bucket index in [0, num_buckets)
         """
-        # Use SHA256 with prefix: seed || hash_idx || key
-        h = hashlib.sha256()
-        h.update(self.seed)
-        h.update(hash_idx.to_bytes(4, "little"))
-        h.update(key)
-        digest = h.digest()
-        # Convert first 8 bytes to int and mod by num_buckets
-        value = int.from_bytes(digest[:8], "little")
+        data = self.seed + hash_idx.to_bytes(4, "little") + key
+        value = int.from_bytes(hashlib.shake_256(data).digest(8), "little")
         return value % self.num_buckets
 
     def all_positions(self, key: bytes) -> list[int]:
@@ -115,7 +106,7 @@ class CuckooTable:
         self.hasher = CuckooHash(params.num_hashes, params.num_buckets, params.seed)
 
         # Each bucket is (key, value) or None
-        self._buckets: list[Optional[tuple[bytes, bytes]]] = [None] * params.num_buckets
+        self._buckets: list[tuple[bytes, bytes] | None] = [None] * params.num_buckets
         self._stash: list[tuple[bytes, bytes]] = []
 
     def insert(self, key: bytes, value: bytes) -> list[tuple[int, bytes]]:
@@ -132,7 +123,6 @@ class CuckooTable:
 
         Returns:
             List of (bucket_idx, entry) for all modified buckets.
-            Empty list if item went to stash.
 
         Raises:
             ValueError: If key or value has wrong size
@@ -170,7 +160,7 @@ class CuckooTable:
         self._stash.append((current_key, current_value))
         return changes
 
-    def _find_key(self, key: bytes) -> tuple[Optional[int], Optional[int]]:
+    def _find_key(self, key: bytes) -> tuple[int | None, int | None]:
         """
         Find key location.
 
@@ -180,10 +170,10 @@ class CuckooTable:
         Returns:
             (bucket_idx, None) if in bucket
             (None, stash_idx) if in stash
+            (None, None) if not found
 
         Raises:
             ValueError: If key has wrong size
-            KeyError: If not found
         """
         if len(key) != self.params.key_size:
             raise ValueError(
@@ -200,36 +190,38 @@ class CuckooTable:
             if stash_key == key:
                 return (None, i)
 
-        raise KeyError(f"Key {key!r} not found in cuckoo table")
+        return (None, None)
 
-    def update(self, key: bytes, new_value: bytes) -> Optional[int]:
+    def upsert(self, key: bytes, value: bytes) -> list[tuple[int, bytes]]:
         """
-        Update the value for an existing key.
+        Update if key exists, insert if not.
 
         Args:
-            key: Key to update (must be exactly key_size bytes)
-            new_value: New value (must be exactly value_size bytes)
+            key: Key (must be exactly key_size bytes)
+            value: Value (must be exactly value_size bytes)
 
         Returns:
-            Bucket index if key was in a bucket, None if key was in stash
+            List of (bucket_idx, entry) for all modified buckets.
 
         Raises:
-            ValueError: If key or new_value has wrong size
-            KeyError: If key not found
+            ValueError: If key or value has wrong size
         """
-        if len(new_value) != self.params.value_size:
+        if len(value) != self.params.value_size:
             raise ValueError(
-                f"Value size mismatch: {len(new_value)} != {self.params.value_size}"
+                f"Value size mismatch: {len(value)} != {self.params.value_size}"
             )
 
         bucket_idx, stash_idx = self._find_key(key)
         if bucket_idx is not None:
-            self._buckets[bucket_idx] = (key, new_value)
+            self._buckets[bucket_idx] = (key, value)
+            return [(bucket_idx, key + value)]
+        elif stash_idx is not None:
+            self._stash[stash_idx] = (key, value)
+            return []
         else:
-            self._stash[stash_idx] = (key, new_value)
-        return bucket_idx
+            return self.insert(key, value)
 
-    def delete(self, key: bytes) -> Optional[int]:
+    def delete(self, key: bytes) -> int | None:
         """
         Delete a key.
 
@@ -244,6 +236,8 @@ class CuckooTable:
             KeyError: If key not found
         """
         bucket_idx, stash_idx = self._find_key(key)
+        if bucket_idx is None and stash_idx is None:
+            raise KeyError(f"Key {key!r} not found in cuckoo table")
         if bucket_idx is not None:
             self._buckets[bucket_idx] = None
         else:

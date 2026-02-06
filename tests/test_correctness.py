@@ -4,11 +4,9 @@ Correctness tests for RMS24 PIR implementation.
 
 import pytest
 import secrets
-import sys
-sys.path.insert(0, "..")
 
 from pir.rms24 import Params, Client, Server
-from pir.rms24.utils import xor_bytes, HMACPRF, find_median_cutoff
+from pir.rms24.utils import xor_bytes, PRF, find_cutoff
 from helpers import create_sequential_database, create_random_database
 
 
@@ -31,22 +29,22 @@ class TestParams:
 
     def test_c_is_even(self):
         """c must be even (hints select c/2 blocks)."""
-        # sqrt(100) = 10, w=10, c=ceil(100/10)=10 (even)
+        # sqrt(100) = 10, round up to power of 2 = 16, c=ceil(100/16)=7 -> 8 (even)
         params = Params(num_entries=100, entry_size=32)
-        assert params.block_size == 10
-        assert params.num_blocks == 10
+        assert params.block_size == 16
+        assert params.num_blocks == 8
         assert params.num_blocks % 2 == 0
 
-        # sqrt(50) = 7.07, ceil = 8, w=8, c=ceil(50/8)=7 -> 8 (rounded to even)
+        # sqrt(50) = 7.07, ceil = 8 (power of 2), c=ceil(50/8)=7 -> 8 (even)
         params = Params(num_entries=50, entry_size=32)
         assert params.block_size == 8
         assert params.num_blocks == 8  # was 7, rounded up to even
         assert params.num_blocks % 2 == 0
 
-        # sqrt(80) = 8.94, ceil = 9, w=9, c=ceil(80/9)=9 -> 10 (rounded to even)
+        # sqrt(80) = 8.94, ceil = 9, round up to power of 2 = 16, c=ceil(80/16)=5 -> 6 (even)
         params = Params(num_entries=80, entry_size=32)
-        assert params.block_size == 9
-        assert params.num_blocks == 10  # was 9, rounded up to even
+        assert params.block_size == 16
+        assert params.num_blocks == 6  # ceil(80/16)=5, rounded up to even
         assert params.num_blocks % 2 == 0
 
     def test_block_calculation(self):
@@ -79,31 +77,31 @@ class TestPRF:
     """Test PRF implementation."""
 
     def test_deterministic(self):
-        prf = HMACPRF(b"0" * 32)
-        v1 = prf.select(0, 0)
-        v2 = prf.select(0, 0)
+        prf = PRF()
+        v1 = prf.select(0, 0, 32)
+        v2 = prf.select(0, 0, 32)
         assert v1 == v2
 
     def test_different_inputs(self):
-        prf = HMACPRF(b"0" * 32)
-        v1 = prf.select(0, 0)
-        v2 = prf.select(0, 1)
-        v3 = prf.select(1, 0)
+        prf = PRF()
+        v1 = prf.select(0, 0, 32)
+        v2 = prf.select(0, 1, 32)
+        v3 = prf.select(1, 0, 32)
         # Should be different with overwhelming probability
         assert len({v1, v2, v3}) == 3
 
-    def test_median_cutoff(self):
+    def test_find_cutoff(self):
         values = [10, 20, 30, 40, 50, 60]
-        cutoff = find_median_cutoff(values)
+        cutoff = find_cutoff(values, 3)
         below = sum(1 for v in values if v < cutoff)
         at_or_above = sum(1 for v in values if v >= cutoff)
         assert below == 3
         assert at_or_above == 3
 
-    def test_median_cutoff_collision(self):
-        """When middle values collide, cutoff should be 0."""
-        values = [10, 20, 30, 30, 50, 60]  # Collision at median
-        cutoff = find_median_cutoff(values)
+    def test_find_cutoff_collision(self):
+        """When boundary values collide, cutoff should be 0."""
+        values = [10, 20, 30, 30, 50, 60]  # Collision at position 3
+        cutoff = find_cutoff(values, 3)
         assert cutoff == 0
 
 

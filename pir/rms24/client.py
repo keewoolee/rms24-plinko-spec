@@ -10,22 +10,21 @@ The client's role:
 """
 
 import secrets
+from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import Iterator, Optional
 
 from .params import Params
 from .messages import Query, Response, EntryUpdate
-from .utils import HMACPRF, find_median_cutoff, xor_bytes, zero_entry
+from .utils import PRF, entries_to_blocks, find_cutoff, xor_bytes, zero_entry
 
 
 @dataclass
 class _QueryState:
     """Internal state from query() needed for extract() and replenish()."""
-    queried_block: int
-    queried_offset: int
+    queried_index: int
     hint_idx: int
     real_is_first: bool
-    entry: Optional[bytes] = None
+    queried_entry: bytes | None = None
 
 
 @dataclass
@@ -38,8 +37,7 @@ class HintState:
     Indices num_reg_hints..num_total_hints-1 are backup hints.
     """
     cutoffs: list[int] = field(default_factory=list)  # 0 = invalid/consumed
-    extra_blocks: list[int] = field(default_factory=list)
-    extra_offsets: list[int] = field(default_factory=list)
+    extras: list[int] = field(default_factory=list)  # extra entry index for each hint
     parities: list[bytes] = field(default_factory=list)
     flips: list[bool] = field(default_factory=list)
     backup_parities_high: list[bytes] = field(default_factory=list)
@@ -54,9 +52,13 @@ class Client:
     After num_backup_hints queries, the offline phase must be re-run.
     """
 
-    def __init__(self, params: Params, prf: Optional[HMACPRF] = None):
+    # -------------------------------------------------------------------------
+    # Initialization
+    # -------------------------------------------------------------------------
+
+    def __init__(self, params: Params):
         self.params = params
-        self.prf = prf or HMACPRF()
+        self.prf = PRF()
         self.hints = HintState()
         self._query_states: list[_QueryState] = []
 
@@ -64,92 +66,108 @@ class Client:
         """Initialize/reset hint arrays to proper sizes."""
         p = self.params
         h = self.hints
-        num_total = p.num_reg_hints + p.num_backup_hints
 
-        h.cutoffs = [0] * num_total
-        h.extra_blocks = [0] * num_total
-        h.extra_offsets = [0] * num_total
-        h.flips = [False] * num_total
-        h.parities = [zero_entry(p.entry_size) for _ in range(num_total)]
+        h.cutoffs = [0] * p.num_total_hints
+        h.extras = [-1] * p.num_total_hints  # -1 = unset (0 is a valid index)
+        h.flips = [False] * p.num_total_hints
+        h.parities = [zero_entry(p.entry_size) for _ in range(p.num_total_hints)]
         h.backup_parities_high = [zero_entry(p.entry_size) for _ in range(p.num_backup_hints)]
         h.next_backup_idx = p.num_reg_hints
 
-    def _hint_contains(self, hint_idx: int, block: int, offset: int) -> bool:
-        """Check if hint's subset contains (block, offset)."""
+    # -------------------------------------------------------------------------
+    # Online phase
+    # -------------------------------------------------------------------------
+
+    def _hint_contains(self, hint_idx: int, index: int) -> bool:
+        """Check if hint's subset contains index."""
         h = self.hints
+        p = self.params
+        block = p.block_of(index)
+        offset = p.offset_in_block(index)
+
         # Check extra first (O(1))
-        if block == h.extra_blocks[hint_idx] and offset == h.extra_offsets[hint_idx]:
+        if h.extras[hint_idx] == index:
             return True
 
-        # Check offset match first - saves select PRF call if offset doesn't match
-        # Offset match is rare (1/block_size), so this is a significant optimization
-        if self.prf.offset(hint_idx, block) % self.params.block_size != offset:
+        if self.prf.offset(hint_idx, block, p.block_size) != offset:
             return False
 
         # Check if block is selected
-        select_value = self.prf.select(hint_idx, block)
+        select_value = self.prf.select(hint_idx, block, p.select_output_bits)
         cutoff = h.cutoffs[hint_idx]
         flip = h.flips[hint_idx]
         return (select_value >= cutoff) if flip else (select_value < cutoff)
 
     def _block_selected(self, hint_idx: int, block: int) -> bool:
-        """Check if block is selected by hint."""
+        """Check if block is selected by hint (PRF < cutoff or PRF >= cutoff if flipped)."""
         h = self.hints
-        select_value = self.prf.select(hint_idx, block)
+        p = self.params
+        select_value = self.prf.select(hint_idx, block, p.select_output_bits)
         cutoff = h.cutoffs[hint_idx]
         flip = h.flips[hint_idx]
         return (select_value >= cutoff) if flip else (select_value < cutoff)
 
-    def generate_hints(self, db_stream: Iterator[list[bytes]]) -> None:
+    # -------------------------------------------------------------------------
+    # Offline phase
+    # -------------------------------------------------------------------------
+
+    def generate_hints(self, db_stream: Iterator[bytes]) -> None:
         """
-        Processes the database block by block and constructs hints.
+        Generate hints by streaming the database.
+
+        Can be called after extract() even if replenish_hints() hasn't been called.
 
         Args:
-            db_stream: Iterator yielding entries for each block
+            db_stream: Iterator yielding each entry in order
         """
-        if self._query_states:
-            raise RuntimeError("Previous query batch not yet completed")
+        # Allow regeneration after extract() but before replenish_hints()
+        if self._query_states and self._query_states[0].queried_entry is None:
+            raise RuntimeError("Must call extract() before regenerating hints")
+        self._query_states = []
+
+        # SEC: Refresh PRF key for independent hints on repeated calls
+        self.prf = PRF()
 
         self._init_hint_arrays()
 
         p = self.params
         h = self.hints
-        num_total_hints = p.num_reg_hints + p.num_backup_hints
 
         # Phase 1: Build skeleton (cutoffs and extras)
-        for hint_idx in range(num_total_hints):
-            select_values = self.prf.select_vector(hint_idx, p.num_blocks)
-            h.cutoffs[hint_idx] = find_median_cutoff(select_values)
+        half = p.num_blocks // 2
+        for hint_idx in range(p.num_total_hints):
+            select_values = self.prf.select_vector(hint_idx, p.num_blocks, p.select_output_bits)
+            h.cutoffs[hint_idx] = find_cutoff(select_values, half)
 
             if hint_idx < p.num_reg_hints and h.cutoffs[hint_idx] != 0:
                 while True:
                     block = secrets.randbelow(p.num_blocks)
-                    if self.prf.select(hint_idx, block) >= h.cutoffs[hint_idx]:
+                    if self.prf.select(hint_idx, block, p.select_output_bits) >= h.cutoffs[hint_idx]:
                         break
-                h.extra_blocks[hint_idx] = block
-                h.extra_offsets[hint_idx] = secrets.randbelow(p.block_size)
+                offset = secrets.randbelow(p.block_size)
+                h.extras[hint_idx] = p.index_from_block_offset(block, offset)
 
         # Phase 2: Stream database and accumulate parities
-        # Possible optimization: defer offset PRF call for regular hints.
-        # Only ~50% of regular hints are selected, and the rest don't need offset
-        # unless block == extra_block. Could save ~33% of offset PRF calls.
-        for block, block_entries in enumerate(db_stream):
-            for hint_idx in range(num_total_hints):
+        # OPT: Hints are independent; could process concurrently.
+        block_stream = entries_to_blocks(db_stream, p.block_size)
+        for block, block_entries in enumerate(block_stream):
+            for hint_idx in range(p.num_total_hints):
                 cutoff = h.cutoffs[hint_idx]
                 if cutoff == 0:
                     continue
 
-                select_value = self.prf.select(hint_idx, block)
-                picked_offset = self.prf.offset(hint_idx, block) % p.block_size
+                select_value = self.prf.select(hint_idx, block, p.select_output_bits)
+                picked_offset = self.prf.offset(hint_idx, block, p.block_size)
                 entry = block_entries[picked_offset]
                 is_selected = select_value < cutoff
 
                 if hint_idx < p.num_reg_hints:
                     if is_selected:
                         h.parities[hint_idx] = xor_bytes(h.parities[hint_idx], entry)
-                    elif block == h.extra_blocks[hint_idx]:
+                    elif block == p.block_of(h.extras[hint_idx]):
+                        extra_offset = p.offset_in_block(h.extras[hint_idx])
                         h.parities[hint_idx] = xor_bytes(
-                            h.parities[hint_idx], block_entries[h.extra_offsets[hint_idx]]
+                            h.parities[hint_idx], block_entries[extra_offset]
                         )
                 else:
                     backup_idx = hint_idx - p.num_reg_hints
@@ -160,15 +178,16 @@ class Client:
                             h.backup_parities_high[backup_idx], entry
                         )
 
-    def _build_query(self, hint_idx: int, queried_block: int) -> tuple[Query, bool]:
-        """Build a query for the given hint and queried block."""
+    def _build_query(self, hint_idx: int, queried_index: int) -> tuple[Query, bool]:
+        """Build a query for the given hint and queried index."""
         h = self.hints
-        num_blocks = self.params.num_blocks
-        block_size = self.params.block_size
-        extra_block = h.extra_blocks[hint_idx]
-        extra_offset = h.extra_offsets[hint_idx]
+        p = self.params
+        num_blocks = p.num_blocks
+        queried_block = p.block_of(queried_index)
+        extra_block = p.block_of(h.extras[hint_idx])
+        extra_offset = p.offset_in_block(h.extras[hint_idx])
 
-        real_is_first = secrets.randbelow(2) == 0
+        real_is_first = secrets.randbelow(2) == 0  # SEC: random subset assignment
         mask_int = 0
         offsets = []
 
@@ -186,7 +205,7 @@ class Client:
                 if block == extra_block:
                     offsets.append(extra_offset)
                 else:
-                    offsets.append(self.prf.offset(hint_idx, block) % block_size)
+                    offsets.append(self.prf.offset(hint_idx, block, p.block_size))
 
             if is_real == real_is_first:
                 mask_int |= 1 << block
@@ -203,11 +222,6 @@ class Client:
         if self._query_states:
             raise RuntimeError("Previous query batch not yet completed")
 
-        targets = [
-            (self.params.block_of(idx), self.params.offset_in_block(idx))
-            for idx in indices
-        ]
-
         num_queries = len(indices)
         queries: list[Query | None] = [None] * num_queries
         states: list[_QueryState | None] = [None] * num_queries
@@ -221,7 +235,7 @@ class Client:
 
             matched_pos = None
             for i in remaining:
-                if self._hint_contains(hint_idx, targets[i][0], targets[i][1]):
+                if self._hint_contains(hint_idx, indices[i]):
                     matched_pos = i
                     break
 
@@ -229,13 +243,13 @@ class Client:
                 continue
 
             remaining.remove(matched_pos)
-            queried_block, queried_offset = targets[matched_pos]
+            queried_index = indices[matched_pos]
 
-            query, real_is_first = self._build_query(hint_idx, queried_block)
+            query, real_is_first = self._build_query(hint_idx, queried_index)
+            h.cutoffs[hint_idx] = 0  # Mark consumed after building query
             queries[matched_pos] = query
             states[matched_pos] = _QueryState(
-                queried_block=queried_block,
-                queried_offset=queried_offset,
+                queried_index=queried_index,
                 hint_idx=hint_idx,
                 real_is_first=real_is_first,
             )
@@ -261,9 +275,9 @@ class Client:
         results = []
         for state, response in zip(self._query_states, responses):
             real_parity = response.parity_0 if state.real_is_first else response.parity_1
-            entry = xor_bytes(real_parity, h.parities[state.hint_idx])
-            state.entry = entry
-            results.append(entry)
+            queried_entry = xor_bytes(real_parity, h.parities[state.hint_idx])
+            state.queried_entry = queried_entry
+            results.append(queried_entry)
 
         return results
 
@@ -273,26 +287,26 @@ class Client:
             raise RuntimeError("Must call query() before replenish_hints()")
 
         for state in self._query_states:
-            if state.entry is None:
+            if state.queried_entry is None:
                 raise RuntimeError("Must call extract() before replenish_hints()")
 
         p = self.params
         h = self.hints
-        num_total_hints = p.num_reg_hints + p.num_backup_hints
 
         for state in self._query_states:
-            h.cutoffs[state.hint_idx] = 0
-
-            while h.next_backup_idx < num_total_hints and h.cutoffs[h.next_backup_idx] == 0:
+            # Find next valid backup (used hint already marked consumed in query())
+            while h.next_backup_idx < p.num_total_hints and h.cutoffs[h.next_backup_idx] == 0:
                 h.next_backup_idx += 1
 
-            if h.next_backup_idx >= num_total_hints:
+            if h.next_backup_idx >= p.num_total_hints:
                 raise RuntimeError("Not enough backup hints")
 
             backup_idx = h.next_backup_idx
             h.next_backup_idx += 1
 
-            select_value = self.prf.select(backup_idx, state.queried_block)
+            # Check which half of backup contains the queried entry
+            queried_block = p.block_of(state.queried_index)
+            select_value = self.prf.select(backup_idx, queried_block, p.select_output_bits)
             cutoff = h.cutoffs[backup_idx]
 
             if select_value >= cutoff:
@@ -302,12 +316,15 @@ class Client:
                 parity = h.backup_parities_high[backup_idx - p.num_reg_hints]
                 flip = True
 
-            h.extra_blocks[backup_idx] = state.queried_block
-            h.extra_offsets[backup_idx] = state.queried_offset
-            h.parities[backup_idx] = xor_bytes(parity, state.entry)
+            h.extras[backup_idx] = state.queried_index
+            h.parities[backup_idx] = xor_bytes(parity, state.queried_entry)
             h.flips[backup_idx] = flip
 
         self._query_states = []
+
+    # -------------------------------------------------------------------------
+    # Maintenance
+    # -------------------------------------------------------------------------
 
     def update_hints(self, updates: list[EntryUpdate]) -> None:
         """Update hints affected by database entry changes."""
@@ -319,28 +336,26 @@ class Client:
             return
 
         p = self.params
-        num_total_hints = p.num_reg_hints + p.num_backup_hints
 
         for u in updates:
-            block = p.block_of(u.index)
-            offset = p.offset_in_block(u.index)
-
             # Update regular hints (including promoted backups)
             for hint_idx in range(h.next_backup_idx):
                 if h.cutoffs[hint_idx] == 0:
                     continue
-                if self._hint_contains(hint_idx, block, offset):
+                if self._hint_contains(hint_idx, u.index):
                     h.parities[hint_idx] = xor_bytes(h.parities[hint_idx], u.delta)
 
             # Update un-promoted backup hints
-            for hint_idx in range(h.next_backup_idx, num_total_hints):
+            block = p.block_of(u.index)
+            offset = p.offset_in_block(u.index)
+            for hint_idx in range(h.next_backup_idx, p.num_total_hints):
                 if h.cutoffs[hint_idx] == 0:
                     continue
-                picked_offset = self.prf.offset(hint_idx, block) % p.block_size
+                picked_offset = self.prf.offset(hint_idx, block, p.block_size)
                 if picked_offset != offset:
                     continue
                 backup_idx = hint_idx - p.num_reg_hints
-                select_value = self.prf.select(hint_idx, block)
+                select_value = self.prf.select(hint_idx, block, p.select_output_bits)
                 if select_value < h.cutoffs[hint_idx]:
                     h.parities[hint_idx] = xor_bytes(h.parities[hint_idx], u.delta)
                 else:
@@ -352,9 +367,8 @@ class Client:
         """Return number of queries remaining before offline phase needed."""
         p = self.params
         h = self.hints
-        num_total_hints = p.num_reg_hints + p.num_backup_hints
         count = 0
-        for hint_idx in range(h.next_backup_idx, num_total_hints):
+        for hint_idx in range(h.next_backup_idx, p.num_total_hints):
             if h.cutoffs[hint_idx] != 0:
                 count += 1
         return count

@@ -4,9 +4,6 @@ Tests for cuckoo hashing implementation.
 
 import pytest
 import secrets
-import sys
-
-sys.path.insert(0, "..")
 
 from pir.keyword_pir import CuckooParams, CuckooHash, CuckooTable
 
@@ -50,10 +47,10 @@ class TestCuckooParams:
         assert params.entry_size == 32  # 8 + 24
 
     def test_key_size_validation(self):
-        with pytest.raises(ValueError, match="key_size must be at least 2"):
+        with pytest.raises(ValueError, match="key_size must be at least 1"):
             CuckooParams(
                 num_buckets=100,
-                key_size=1,
+                key_size=0,
                 value_size=32,
                 num_hashes=2,
             )
@@ -209,14 +206,12 @@ class TestCuckooTable:
             table.insert(b"k" * 16, b"short")
 
     def test_seed_reproducibility(self):
-        """Same seed should produce same hash positions."""
-        seed = b"test_seed_123456"
+        """Same params (same seed) should produce same hash positions."""
         params = CuckooParams(
             num_buckets=150,
             key_size=16,
             value_size=32,
             num_hashes=2,
-            seed=seed,
         )
         table1 = CuckooTable(params)
         table2 = CuckooTable(params)
@@ -226,52 +221,43 @@ class TestCuckooTable:
         pos2 = table2.hasher.all_positions(key)
         assert pos1 == pos2
 
-    def test_update(self, small_params):
-        """Test updating an existing key in bucket."""
+    def test_upsert_existing(self, small_params):
+        """Upsert updates an existing key in bucket."""
         table = CuckooTable(small_params)
         key = b"k" * 16
         value = b"v" * 32
         new_value = b"n" * 32
         table.insert(key, value)
 
-        bucket_idx = table.update(key, new_value)
-        assert bucket_idx is not None  # Key is in bucket, not stash
+        changes = table.upsert(key, new_value)
+        assert len(changes) == 1
         assert find_in_table(table, key) == new_value
 
-    def test_update_nonexistent_key(self, small_params):
-        """Updating a nonexistent key raises KeyError."""
+    def test_upsert_new(self, small_params):
+        """Upsert inserts a new key."""
         table = CuckooTable(small_params)
         key = b"k" * 16
         value = b"v" * 32
-        with pytest.raises(KeyError):
-            table.update(key, value)
 
-    def test_update_wrong_key_size(self, small_params):
-        """Updating with wrong key size raises ValueError."""
-        table = CuckooTable(small_params)
-        with pytest.raises(ValueError, match="Key size mismatch"):
-            table.update(b"short", b"v" * 32)
+        changes = table.upsert(key, value)
+        assert len(changes) >= 1
+        assert find_in_table(table, key) == value
 
-    def test_update_wrong_value_size(self, small_params):
-        """Updating with wrong value size raises ValueError."""
+    def test_upsert_wrong_value_size(self, small_params):
+        """Upsert with wrong value size raises ValueError."""
         table = CuckooTable(small_params)
         key = b"k" * 16
-        value = b"v" * 32
-        table.insert(key, value)
-
         with pytest.raises(ValueError, match="Value size mismatch"):
-            table.update(key, b"short")
+            table.upsert(key, b"short")
 
-    def test_update_stash_item(self):
-        """Updating a stash item returns None."""
-        # Use tiny table to force stash usage
+    def test_upsert_stash_item(self):
+        """Upsert updates a stash item, returning no bucket changes."""
         params = CuckooParams(
             num_buckets=10,
             key_size=16,
             value_size=32,
             num_hashes=2,
         )
-        # Insert many items to force some into stash
         pairs = {
             f"key_{i:012d}".encode(): f"value_{i:026d}".encode()
             for i in range(50)
@@ -279,12 +265,11 @@ class TestCuckooTable:
         table = CuckooTable.build(pairs, params)
         assert len(table.stash) > 0, "Test requires items in stash"
 
-        # Update a stash item
         stash_key, old_value = table.stash[0]
         new_value = b"updated_stash_value_________!!!!"  # 32 bytes
-        bucket_idx = table.update(stash_key, new_value)
+        changes = table.upsert(stash_key, new_value)
 
-        assert bucket_idx is None
+        assert changes == []
         assert find_in_table(table, stash_key) == new_value
 
     def test_insert_returns_changes(self, small_params):

@@ -1,15 +1,22 @@
 """
-RMS24 PIR scheme implementation.
+Plinko PIR scheme implementation, based on the Plinko scheme applied to RMS24.
 
-RMS24 is a single-server PIR scheme with client-dependent preprocessing.
-Based on "Simple and Practical Amortized Sublinear Private Information
-Retrieval using Dummy Subsets" (https://eprint.iacr.org/2023/1072).
+Plinko uses Invertible PRFs (iPRFs) to achieve:
+- Õ(1) hint searching and updating (vs linear scan)
+- Optimal online time for any client storage
+
+The key components:
+- PRP: Small-domain Pseudorandom Permutation (Sometimes-Recurse Shuffle)
+- PMNS: Pseudorandom Multinomial Sampler
+- iPRF: Invertible PRF (composition of PRP and PMNS)
+- Client: PIR client
+- Server: PIR server
 """
 
 from .params import Params
+from .messages import Query, Response, EntryUpdate
 from .client import Client
 from .server import Server
-from .messages import Query, Response, EntryUpdate
 
 
 def create_params(num_entries: int, entry_size: int, **kwargs) -> Params:

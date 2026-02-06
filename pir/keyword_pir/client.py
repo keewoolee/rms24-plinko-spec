@@ -4,13 +4,13 @@ KPIR Client (Section 5, eprint 2019/1483).
 Wraps any index-based PIR client with cuckoo hashing for keyword lookups.
 """
 
+from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Iterator, Optional
+from types import ModuleType
 
 from .cuckoo import CuckooHash
 from .params import KPIRParams
 from ..protocols import PIRClient, Query, Response, EntryUpdate
-from ..rms24 import Params as PIRParams
 
 
 @dataclass
@@ -32,42 +32,43 @@ class KPIRClient:
         Initialize client.
 
         Args:
-            params: KPIR parameters (includes cuckoo seed)
+            params: KPIR parameters
             pir_client: Underlying PIR client
         """
         self.params = params
         cuckoo = params.cuckoo_params
         self._hasher = CuckooHash(cuckoo.num_hashes, cuckoo.num_buckets, cuckoo.seed)
         self._pir_client = pir_client
-        self._query_state: Optional[_KPIRQueryState] = None
+        self._query_state: _KPIRQueryState | None = None
 
     @classmethod
     def create(
         cls,
         params: KPIRParams,
-        pir_client_factory,
-        security_param: int = 80,
+        pir_module: ModuleType,
+        **pir_kwargs,
     ) -> "KPIRClient":
         """
         Create a KPIRClient from parameters.
 
         Args:
-            params: KPIR parameters (includes cuckoo seed)
-            pir_client_factory: Callable(pir_params) -> PIRClient
-            security_param: Security parameter for underlying PIR (default: 80)
+            params: KPIR parameters
+            pir_module: PIR module (e.g., rms24 or plinko) with Client and create_params
+            **pir_kwargs: Scheme-specific options passed to pir_module.create_params()
+                (e.g., security_param, block_size, num_backup_hints)
 
         Returns:
             Configured KPIRClient
         """
-        pir_params = PIRParams(
+        pir_params = pir_module.create_params(
             num_entries=params.num_buckets,
             entry_size=params.entry_size,
-            security_param=security_param,
+            **pir_kwargs,
         )
-        pir_client = pir_client_factory(pir_params)
+        pir_client = pir_module.Client(pir_params)
         return cls(params, pir_client)
 
-    def generate_hints(self, db_stream: Iterator[list[bytes]]) -> None:
+    def generate_hints(self, db_stream: Iterator[bytes]) -> None:
         """
         Generate hints from database stream.
 
@@ -106,7 +107,7 @@ class KPIRClient:
         keyword: bytes,
         candidates: list[bytes],
         stash_dict: dict[bytes, bytes],
-    ) -> Optional[bytes]:
+    ) -> bytes | None:
         """Find value for keyword in candidates or stash."""
         key_size = self.params.key_size
         for candidate in candidates:
@@ -118,7 +119,7 @@ class KPIRClient:
         self,
         responses: list[Response],
         stash: list[tuple[bytes, bytes]],
-    ) -> list[Optional[bytes]]:
+    ) -> list[bytes | None]:
         """
         Extract values from responses.
 

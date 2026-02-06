@@ -4,12 +4,9 @@ Tests for Keyword PIR implementation.
 
 import pytest
 import secrets
-import sys
-
-sys.path.insert(0, "..")
 
 from pir.keyword_pir import KPIRParams, KPIRClient, KPIRServer
-from pir.rms24 import Client as RMS24Client, Server as RMS24Server
+from pir import rms24, plinko
 
 
 def create_keyword_setup(
@@ -18,8 +15,9 @@ def create_keyword_setup(
     value_size: int = 32,
     security_param: int = 40,
     expansion_factor: int = 3,
+    pir_module=rms24,
 ):
-    """Helper to create keyword PIR setup with RMS24 backend."""
+    """Helper to create keyword PIR setup with configurable PIR backend."""
     kw_params = KPIRParams(
         num_items_expected=num_items,
         key_size=key_size,
@@ -32,8 +30,8 @@ def create_keyword_setup(
         for i in range(num_items)
     }
 
-    server = KPIRServer.create(kv_pairs, kw_params, RMS24Server, security_param)
-    client = KPIRClient.create(kw_params, RMS24Client, security_param)
+    server = KPIRServer.create(kv_pairs, kw_params, pir_module, security_param=security_param)
+    client = KPIRClient.create(kw_params, pir_module, security_param=security_param)
 
     return kw_params, kv_pairs, server, client
 
@@ -334,8 +332,8 @@ class TestKeywordStashOperations:
             for i in range(15)  # More than buckets, some go to stash
         }
 
-        server = KPIRServer.create(kv_pairs, kw_params, RMS24Server, 40)
-        client = KPIRClient.create(kw_params, RMS24Client, 40)
+        server = KPIRServer.create(kv_pairs, kw_params, rms24, security_param=40)
+        client = KPIRClient.create(kw_params, rms24, security_param=40)
         client.generate_hints(server.stream_database())
 
         # Find a key in stash
@@ -374,8 +372,8 @@ class TestKeywordPIRLarger:
             value = secrets.token_bytes(64)
             kv_pairs[key] = value
 
-        server = KPIRServer.create(kv_pairs, kw_params, RMS24Server, 40)
-        client = KPIRClient.create(kw_params, RMS24Client, 40)
+        server = KPIRServer.create(kv_pairs, kw_params, rms24, security_param=40)
+        client = KPIRClient.create(kw_params, rms24, security_param=40)
         client.generate_hints(server.stream_database())
 
         # Query random keys
@@ -409,6 +407,96 @@ class TestRemainingQueries:
 
         # Should decrease by 1 (for keyword queries)
         assert client.remaining_queries() == initial - 1
+
+
+class TestKeywordPIRWithPlinko:
+    """Test Keyword PIR with Plinko backend."""
+
+    @pytest.fixture
+    def plinko_setup(self):
+        """Setup using Plinko as PIR backend."""
+        return create_keyword_setup(num_items=50, security_param=40, pir_module=plinko)
+
+    def test_single_query(self, plinko_setup):
+        params, kv_pairs, server, client = plinko_setup
+        client.generate_hints(server.stream_database())
+
+        key = b"key_000000000000"
+        expected_value = kv_pairs[key]
+
+        queries = client.query([key])
+        responses, stash = server.answer(queries)
+        [result] = client.extract(responses, stash)
+        client.replenish_hints()
+
+        assert result == expected_value
+
+    def test_multiple_queries(self, plinko_setup):
+        params, kv_pairs, server, client = plinko_setup
+        client.generate_hints(server.stream_database())
+
+        keys_to_query = [
+            b"key_000000000000",
+            b"key_000000000010",
+            b"key_000000000025",
+            b"key_000000000049",
+        ]
+
+        for key in keys_to_query:
+            if client.remaining_queries() == 0:
+                break
+            queries = client.query([key])
+            responses, stash = server.answer(queries)
+            [result] = client.extract(responses, stash)
+            client.replenish_hints()
+            assert result == kv_pairs[key], f"Mismatch for key {key}"
+
+    def test_query_nonexistent_key(self, plinko_setup):
+        params, kv_pairs, server, client = plinko_setup
+        client.generate_hints(server.stream_database())
+
+        key = b"nonexistent_key!"  # 16 bytes
+
+        queries = client.query([key])
+        responses, stash = server.answer(queries)
+        [result] = client.extract(responses, stash)
+        client.replenish_hints()
+
+        assert result is None
+
+    def test_update_single_key(self, plinko_setup):
+        params, kv_pairs, server, client = plinko_setup
+        client.generate_hints(server.stream_database())
+
+        key = b"key_000000000010"
+        new_value = b"updated_value_______________!!!!"  # 32 bytes
+
+        updates = server.update({key: new_value})
+        client.update_hints(updates)
+
+        queries = client.query([key])
+        responses, stash = server.answer(queries)
+        [result] = client.extract(responses, stash)
+        client.replenish_hints()
+
+        assert result == new_value
+
+    def test_insert_new_key(self, plinko_setup):
+        params, kv_pairs, server, client = plinko_setup
+        client.generate_hints(server.stream_database())
+
+        key = b"new_key_________"  # 16 bytes
+        value = b"new_value_______________________"  # 32 bytes
+
+        updates = server.update({key: value})
+        client.update_hints(updates)
+
+        queries = client.query([key])
+        responses, stash = server.answer(queries)
+        [result] = client.extract(responses, stash)
+        client.replenish_hints()
+
+        assert result == value
 
 
 if __name__ == "__main__":

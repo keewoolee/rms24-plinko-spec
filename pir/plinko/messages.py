@@ -1,5 +1,5 @@
 """
-Message types for RMS24 PIR scheme.
+Message types for Plinko PIR scheme.
 """
 
 from dataclasses import dataclass

@@ -90,14 +90,14 @@ Per keyword query:
 - **Query**: num_hashes × PIR query size
 - **Response**: num_hashes × PIR response size + stash
 
-With 2 hash functions, expansion_factor=3, and RMS24:
+With 2 hash functions and expansion_factor=3:
 - Query: 2 × O(√3n) bytes
-- Response: 2 × O(entry_size) bytes
+- Response: 2 × O(entry_size) bytes, where entry_size = key_size + value_size
 
 ## Example
 
 ```python
-from pir.rms24 import Client, Server
+from pir import rms24  # or plinko
 from pir.keyword_pir import KPIRParams, KPIRClient, KPIRServer
 
 # Key-value store (32-byte keys and values)
@@ -114,8 +114,8 @@ kw_params = KPIRParams(
 )
 
 # Setup
-server = KPIRServer.create(kv_store, kw_params, Server)
-client = KPIRClient.create(kw_params, Client)
+server = KPIRServer.create(kv_store, kw_params, rms24)
+client = KPIRClient.create(kw_params, rms24)
 
 # Offline phase
 client.generate_hints(server.stream_database())

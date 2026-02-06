@@ -1,14 +1,14 @@
 """
-Utility functions for RMS24 PIR scheme.
+Utility functions for Plinko PIR scheme.
 
 Includes:
 - PRF for block selection and offset computation
+- PRG (Pseudorandom Generator) for deterministic random sampling
+- derive_seed for key derivation
 - find_cutoff for hint generation
 - xor_bytes and zero_entry utilities
-- entries_to_blocks for streaming
 """
 
-from collections.abc import Iterator, Generator
 import hashlib
 import secrets
 import struct
@@ -16,7 +16,7 @@ import struct
 
 class PRF:
     """
-    SHAKE-256 based PRF for RMS24.
+    SHAKE-256 based PRF for Plinko PIR.
 
     Used for block selection (determining which blocks are in a hint's subset)
     and offset computation within blocks.
@@ -115,6 +115,66 @@ def find_cutoff(values: list[int], select_count: int) -> int:
     return sorted_values[select_count]
 
 
+def derive_seed(key: bytes, label: bytes) -> bytes:
+    """
+    Derive a deterministic seed from key and label using SHAKE-256.
+
+    Returns 32 bytes suitable for seeding random sampling.
+    """
+    return hashlib.shake_256(key + label).digest(32)
+
+
+class PRG:
+    """
+    Pseudorandom Number Generator using SHAKE-256 in counter mode.
+
+    OPT: Could use a faster PRG (e.g., AES-CTR).
+
+    Deterministic: same seed produces same sequence.
+    Each call to random_bytes() produces output based on the seed
+    and an internal counter.
+    """
+
+    def __init__(self, seed: bytes):
+        """
+        Initialize with a seed.
+
+        Args:
+            seed: Seed bytes (typically 32 bytes from derive_seed)
+        """
+        self._seed = seed
+        self._counter = 0
+
+    def random_bytes(self, n: int) -> bytes:
+        """Get n random bytes."""
+        data = hashlib.shake_256(
+            self._seed + self._counter.to_bytes(8, "little")
+        ).digest(n)
+        self._counter += 1
+        return data
+
+    def random_float(self) -> float:
+        """Get a random float in [0, 1)."""
+        return int.from_bytes(self.random_bytes(8), "little") / (2**64)
+
+    def binomial(self, n: int, p: float) -> int:
+        """Sample from Binomial(n, p).
+
+        OPT: O(n) implementation. For large n, could use normal approximation
+        or BTPE algorithm for O(1) expected time.
+        """
+        if n == 0 or p == 0.0:
+            return 0
+        if p == 1.0:
+            return n
+
+        count = 0
+        for _ in range(n):
+            if self.random_float() < p:
+                count += 1
+        return count
+
+
 def xor_bytes(a: bytes, b: bytes) -> bytes:
     """XOR two byte strings of equal length.
 
@@ -128,24 +188,3 @@ def xor_bytes(a: bytes, b: bytes) -> bytes:
 def zero_entry(entry_size: int) -> bytes:
     """Create a zero-filled entry."""
     return bytes(entry_size)
-
-
-def entries_to_blocks(entry_stream: Iterator[bytes], block_size: int) -> Generator[list[bytes], None, None]:
-    """
-    Convert entry stream to block stream.
-
-    Args:
-        entry_stream: Iterator yielding entries one by one
-        block_size: Number of entries per block
-
-    Yields:
-        Lists of entries, one block at a time
-    """
-    block = []
-    for entry in entry_stream:
-        block.append(entry)
-        if len(block) == block_size:
-            yield block
-            block = []
-    if block:
-        yield block

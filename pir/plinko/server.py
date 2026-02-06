@@ -1,10 +1,13 @@
 """
-Server implementation for RMS24 single-server PIR.
+Server implementation for Plinko PIR.
 
 The server's role is simple:
 1. Store the database
 2. Stream the database to clients during offline phase
 3. Answer online queries by computing XOR parities of requested subsets
+
+The server sees standard PIR queries and responds accordingly. It is unaware
+of the client's iPRF-based hint organization.
 """
 
 from collections.abc import Iterator
@@ -16,10 +19,11 @@ from .utils import xor_bytes, zero_entry
 
 class Server:
     """
-    PIR Server for the single-server RMS24 scheme.
+    PIR Server for the Plinko scheme.
 
-    The server holds the database and answers queries without
-    learning which entry the client is interested in.
+    The server holds the database and answers queries without learning
+    which entry the client is interested in. Each query specifies two
+    subsets of blocks; the server computes XOR parities for both subsets.
     """
 
     def __init__(self, database: list[bytes], params: Params):
@@ -50,6 +54,10 @@ class Server:
     def answer(self, queries: list[Query]) -> list[Response]:
         """
         Answer multiple queries by computing parities of subsets.
+
+        For each query, the server computes XOR parities for two subsets
+        of database entries. Each subset contains num_blocks/2 entries
+        (one per block in that subset).
 
         Args:
             queries: List of queries containing mask and offsets

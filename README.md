@@ -1,6 +1,6 @@
-# RMS24: A Runnable Specification
+# RMS24 & Plinko: A Runnable Specification
 
-A readable, executable specification of the RMS24 single-server PIR scheme with Keyword PIR support.
+A readable, executable specification of single-server PIR schemes with Keyword PIR support.
 
 ## Purpose
 
@@ -14,11 +14,13 @@ This repository serves as:
 ## Features
 
 - **Single-server PIR** with client-dependent preprocessing
-  - Based on [RMS24](https://eprint.iacr.org/2023/1072)
+  - **RMS24**: Based on [RMS24](https://eprint.iacr.org/2023/1072)
+  - **Plinko**: Based on [Plinko](https://eprint.iacr.org/2024/318)
+    - Hint updates cost Õ(1) via invertible PRF (iPRF), but with significant concrete overhead
   - O(√num_entries) online communication and server computation
   - Supports O(√num_entries) queries before re-running offline phase
 
-- **Keyword PIR** via cuckoo hashing
+- **Keyword PIR** via cuckoo hashing (works with both RMS24 and Plinko)
   - Based on [ALPRSSY21](https://eprint.iacr.org/2019/1483)
 
 - **Updatability** without re-running offline phase
@@ -35,11 +37,14 @@ This repository serves as:
 ## Quick Start
 
 ```bash
-# Run demo (1 MiB database)
-python3 demo.py
+# Run RMS24 PIR demo
+python3 demo.py --rms24
+
+# Run Plinko PIR demo
+python3 demo.py --plinko
 
 # Run Keyword PIR demo
-python3 demo.py --kpir
+python3 demo.py --kpir-rms24
 ```
 
 ## Usage
@@ -47,7 +52,7 @@ python3 demo.py --kpir
 ### Index PIR
 
 ```python
-from pir.rms24 import Params, Client, Server
+from pir.rms24 import Params, Client, Server  # or pir.plinko
 
 database = [bytes(32) for _ in range(1000)]  # 1000 entries, 32 bytes each
 
@@ -69,7 +74,7 @@ client.update_hints(updates)
 ### Keyword PIR
 
 ```python
-from pir.rms24 import Client, Server
+from pir.rms24 import Client, Server  # or pir.plinko
 from pir.keyword_pir import KPIRParams, KPIRClient, KPIRServer
 
 kv_store = {b"key1".ljust(32): b"value1".ljust(32)}  # 32-byte keys and values
@@ -90,37 +95,41 @@ updates = server.update({b"key1".ljust(32): b"new_val".ljust(32)})  # Update
 client.update_hints(updates)
 ```
 
-## Performance
+## Benchmarks
 
-**Setup**: 1 MiB database, 32-byte entries, security_param=80, Apple M3
+**Setup**: 64 entries × 32 bytes, security_param=128
 
-*Note: This is un-optimized Python prioritizing clarity over performance.*
+*Note: With only 64 entries, this benchmark does not demonstrate Plinko's asymptotic Õ(1) advantage. However, it illustrates the significant concrete overhead of the iPRF construction.*
 
 ### Index PIR
 
-| Phase | Operation | Time | Communication |
-|-------|-----------|------|---------------|
-| Offline | `generate_hints()` | ~23s | 1 MiB (download) |
-| Online | `query()` | ~1.1ms | 387 B (mask + offsets) |
-| | `answer()` | ~0.26ms | 64 B (2 parities) |
-| | `extract()` | ~3μs | - |
-| | `replenish_hints()` | ~5μs | - |
-| | **Total** | **~1.4ms** | **~450 B** |
-| Update | `update_entries()` | ~10μs | 36 B (index + delta) |
-| | `update_hints()` | ~43ms | - |
+| Operation | RMS24 | Plinko | Communication |
+|-----------|-------|--------|---------------|
+| Hint generation | 57ms | 33s | 2 KiB (download) |
+| Query (hint search) | 41μs | 614ms | 17 B |
+| Server answer | 12μs | 12μs | 64 B |
+| Update (hint update) | 2ms | 602ms | 36 B |
 
 ### Keyword PIR
 
-| Phase | Operation | Time | Communication |
-|-------|-----------|------|---------------|
-| Offline | `generate_hints()` | ~80s | 6 MiB (download) |
-| Online | `query()` | ~3.6ms | 1.3 KiB (2 PIR queries) |
-| | `answer()` | ~1.4ms | 256 B (2 PIR responses) |
-| | `extract()` | ~8μs | - |
-| | `replenish_hints()` | ~11μs | - |
-| | **Total** | **~5.0ms** | **~1.6 KiB** |
-| Update | `update()` | ~28μs | 68 B (index + delta) |
-| | `update_hints()` | ~73ms | - |
+| Operation | RMS24 | Plinko | Communication |
+|-----------|-------|--------|---------------|
+| Hint generation | 198ms | 99s | 12 KiB (download) |
+| Query (hint search) | 114μs | 1.2s | 52 B |
+| Server answer | 53μs | 53μs | 256 B |
+| Update (hint update) | 4ms | 590ms | 68 B |
+
+Run benchmarks with:
+
+```bash
+python3 demo.py --rms24         # RMS24 PIR
+python3 demo.py --plinko        # Plinko PIR
+python3 demo.py --kpir-rms24    # Keyword PIR (RMS24 backend)
+python3 demo.py --kpir-plinko   # Keyword PIR (Plinko backend)
+python3 demo.py --benchmark     # Compare RMS24 vs Plinko
+```
+
+Use `--entries N` to adjust database size (default: 64 entries).
 
 ## Project Structure
 
@@ -129,12 +138,25 @@ rms24/
 ├── demo.py                 # Benchmarks and usage examples
 ├── pir/
 │   ├── protocols.py        # PIR client/server interfaces
-│   ├── rms24/              # Core RMS24 implementation
+│   ├── rms24/              # RMS24 scheme
 │   │   ├── params.py       # Parameter configuration
 │   │   ├── client.py       # Client (hint generation, queries)
 │   │   ├── server.py       # Server (database, responses)
 │   │   ├── messages.py     # Query/Response types
 │   │   └── utils.py        # PRF and XOR utilities
+│   ├── plinko/             # Plinko scheme
+│   │   ├── params.py       # Parameter configuration
+│   │   ├── client.py       # Client (hint generation, queries)
+│   │   ├── server.py       # Server (database, responses)
+│   │   ├── messages.py     # Query/Response types
+│   │   ├── utils.py        # PRF, PRG, and XOR utilities
+│   │   ├── iprf.py         # Invertible PRF (PRP + PMNS)
+│   │   ├── prp.py          # Small-domain PRP (MR14)
+│   │   └── pmns.py         # Pseudorandom multinomial sampler
+│   ├── primitives/         # Primitive API definitions
+│   │   ├── prp.py          # PRP interface
+│   │   ├── pmns.py         # PMNS interface
+│   │   └── iprf.py         # iPRF interface
 │   └── keyword_pir/        # Keyword PIR layer
 │       ├── params.py       # KPIR parameters
 │       ├── client.py       # KPIR client
@@ -143,21 +165,17 @@ rms24/
 └── tests/                  # Test suite
 ```
 
-## Optimization Opportunities
+## Implementation Notes
 
-The Python implementation prioritizes clarity (e.g., HMAC-SHA256 for PRF). For production use, consider:
+This is an unoptimized reference implementation prioritizing clarity over performance.
 
-- **Faster PRF**: Use ChaCha or AES instead of HMAC-SHA256
-- **Batched PRF evaluation**: Compute multiple PRF outputs per call
-- **Partial sort for cutoff**: Use `nth_element` / quickselect instead of full sort (O(n) vs O(n log n))
-- **SIMD XOR**: Use AVX2/AVX-512 for parity accumulation
-- **Parallel hint generation**: Process multiple hints concurrently
-- **KPIR expansion factor**: Current setting is conservative; can be tuned for specific use cases
-- **KPIR entry size**: Store `Hash(Key)||Value` instead of `Key||Value` to reduce entry size
+- `# OPT:` comments mark parts that could be optimized
+- `# SEC:` comments mark security-related notes
 
 ## References
 
 - **RMS24**: Ling Ren, Muhammad Haris Mughees, I Sun. [Simple and Practical Amortized Sublinear Private Information Retrieval](https://eprint.iacr.org/2023/1072). CCS 2024.
+- **Plinko**: Alexander Hoover, Sarvar Patel, Giuseppe Persiano, Kevin Yeo. [Plinko: Single-Server PIR with Efficient Updates via Invertible PRFs](https://eprint.iacr.org/2024/318). Eurocrypt 2025.
 - **S3PIR**: [github.com/renling/S3PIR](https://github.com/renling/S3PIR) - Accompanying C++ PoC for RMS24 with optimizations (batched AES-PRF).
 - **Keyword PIR**: Asra Ali, Tancrède Lepoint, Sarvar Patel, Mariana Raykova, Phillipp Schoppmann, Karn Seth, Kevin Yeo. [Communication-Computation Trade-offs in PIR](https://eprint.iacr.org/2019/1483). USENIX Security 2021.
 
